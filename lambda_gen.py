@@ -115,7 +115,6 @@ class NodeKind(Enum):
     THUNK = 4
     VALUE = 5
 
-@dataclass
 @dataclass(slots=True)
 class GraphNode:
     #DAG node for call-by-need reduction with sharing.
@@ -458,7 +457,7 @@ class TreeReducer:
         trace.append((current, final_redex))
         return trace, True
     
-    def _find_leftmost_outermost(self, term: Term, path: List[int] = None) -> Optional[List[int]]:
+    def _find_leftmost_outermost(self, term: Term, path: Optional[List[int]] = None) -> Optional[List[int]]:
         #Find leftmost-outermost β-redex.#
         if path is None:
             path = []
@@ -509,7 +508,7 @@ class GraphReducer:
         self.thunk_evals = 0
         self.thunk_hits = 0
     
-    def term_to_graph(self, term: Term, env: List[GraphNode] = None) -> GraphNode:
+    def term_to_graph(self, term: Term, env: Optional[List[GraphNode]] = None) -> GraphNode:
         #Convert tree term to graph node.#
         if env is None:
             env = []
@@ -689,11 +688,11 @@ def generate_example(config: Config, rng: random.Random, draw_index: int) -> Opt
     # Reduce based on strategy
     try:
         if config.strategy == 'levy_like' and config.share:
-            reducer = GraphReducer(config.max_steps)
-            trace, diverged, thunk_evals, thunk_hits = reducer.reduce(term)
+            graph_reducer = GraphReducer(config.max_steps)
+            trace, diverged, thunk_evals, thunk_hits = graph_reducer.reduce(term)
         else:
-            reducer = TreeReducer(config.max_steps)
-            trace, diverged = reducer.reduce(term)
+            tree_reducer = TreeReducer(config.max_steps)
+            trace, diverged = tree_reducer.reduce(term)
             thunk_evals, thunk_hits = 0, 0
     except Exception as e:
         sys.stderr.write(f"\n[Error during reduction: {e}]\n")

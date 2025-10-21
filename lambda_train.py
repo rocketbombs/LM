@@ -284,7 +284,7 @@ class TokenBudgetBatchSampler(torch.utils.data.Sampler):
     
     def __iter__(self) -> Iterator[List[int]]:
         indices = list(self.indices)
-        
+
         if self.shuffle:
             # Bucketed shuffle: shuffle within buckets to maintain length locality
             bucket_size = 128
@@ -293,8 +293,8 @@ class TokenBudgetBatchSampler(torch.utils.data.Sampler):
                 import random
                 random.shuffle(bucket)
             indices = [idx for bucket in buckets for idx in bucket]
-        
-        mini_batch = []
+
+        mini_batch: List[int] = []
         max_len_in_batch = 0
         
         for idx in indices:
@@ -339,8 +339,8 @@ class LambdaDataset(Dataset):
         self.max_len = max_len
         self.truncate = truncate
         self.buffer_size = buffer_size
-        
-        self.examples = []
+
+        self.examples: List[Dict[str, Any]] = []
         self._load_from_jsonl(jsonl_path, buffer_size)
     
     def _load_from_jsonl(self, path: str, max_examples: int):
@@ -683,6 +683,7 @@ class LambdaSpanPredictor(nn.Module):
         self.token_embedding = nn.Embedding(vocab_size, config.d_model)
         
         # Positional encoding
+        self.rope: Optional[RotaryEmbedding]
         if config.pos_encoding == 'rope':
             self.rope = RotaryEmbedding(config.d_model // config.n_heads, config.max_len)
         else:
@@ -1007,9 +1008,9 @@ class Trainer:
         self.writer = None
         if config.tb:
             self.writer = SummaryWriter(config.out)
-        
+
         # Metrics tracking
-        self.train_metrics = defaultdict(lambda: deque(maxlen=100))
+        self.train_metrics: Dict[str, deque] = defaultdict(lambda: deque(maxlen=100))
         
         # Setup output directory
         self.out_dir = Path(config.out)
@@ -1208,8 +1209,11 @@ class Trainer:
         self.model.eval()
         total_loss = 0
         all_metrics = defaultdict(list)
-        qualitative_samples = []
-        
+        qualitative_samples: List[str] = []
+
+        if self.val_loader is None:
+            return float('inf')
+
         with torch.no_grad():
             for batch_idx, batch in enumerate(self.val_loader):
                 batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v 
@@ -1273,6 +1277,8 @@ class Trainer:
     
     def _log_qualitative_samples(self, samples: List[str]):
         #Log qualitative samples to TensorBoard.#
+        if self.writer is None:
+            return
         combined = "\n---\n".join(samples)
         self.writer.add_text('eval/samples', combined, self.step)
     
