@@ -486,19 +486,24 @@ class RMSNorm(nn.Module):
 
 
 class RotaryEmbedding(nn.Module):
-    
+
     def __init__(self, dim: int, max_seq_len: int = 8192):
         super().__init__()
         inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim))
         self.register_buffer('inv_freq', inv_freq)
         self.max_seq_len = max_seq_len
-        
+
         # Pre-compute positional encodings
         t = torch.arange(max_seq_len, dtype=torch.float)
         freqs = torch.outer(t, inv_freq)
         emb = torch.cat([freqs, freqs], dim=-1)
         self.register_buffer('cos_cached', emb.cos())
         self.register_buffer('sin_cached', emb.sin())
+
+        # Type hints for buffers (for IDE type checking)
+        self.cos_cached: torch.Tensor
+        self.sin_cached: torch.Tensor
+        self.inv_freq: torch.Tensor
     
     def forward(self, x: torch.Tensor, seq_len: int) -> Tuple[torch.Tensor, torch.Tensor]:
         return self.cos_cached[:seq_len], self.sin_cached[:seq_len]
@@ -554,7 +559,7 @@ class MultiHeadAttention(nn.Module):
         q, k, v = qkv.unbind(dim=2)
         
         # Apply RoPE if provided
-        if rope_cos is not None:
+        if rope_cos is not None and rope_sin is not None:
             q = apply_rotary_emb(q, rope_cos, rope_sin)
             k = apply_rotary_emb(k, rope_cos, rope_sin)
         
@@ -705,7 +710,7 @@ class LambdaSpanPredictor(nn.Module):
         # Enable gradient checkpointing if requested
         if config.grad_checkpoint:
             for block in self.blocks:
-                block.use_ckpt = True
+                setattr(block, 'use_ckpt', True)
         
         # Prediction heads
         self.start_head = nn.Linear(config.d_model, 1)
@@ -1175,7 +1180,7 @@ class Trainer:
                 for k, v in batch.items()}
         
         # Forward pass with AMP
-        with autocast('cuda', dtype=self.amp_dtype, enabled=self.amp_dtype is not None):
+        with autocast(device_type='cuda', dtype=self.amp_dtype, enabled=self.amp_dtype is not None):
             outputs = self.model(batch['input_ids'], batch['attention_mask'])
             loss, loss_dict = compute_total_loss(outputs, batch, self.config)
         
@@ -1216,10 +1221,10 @@ class Trainer:
 
         with torch.no_grad():
             for batch_idx, batch in enumerate(self.val_loader):
-                batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v 
+                batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v
                         for k, v in batch.items()}
-                
-                with autocast('cuda', dtype=self.amp_dtype, enabled=self.amp_dtype is not None):
+
+                with autocast(device_type='cuda', dtype=self.amp_dtype, enabled=self.amp_dtype is not None):
                     outputs = self.model(batch['input_ids'], batch['attention_mask'])
                     loss, loss_dict = compute_total_loss(outputs, batch, self.config)
                 
@@ -1254,13 +1259,13 @@ class Trainer:
         # Get predictions
         start_preds = outputs['start_logits'].argmax(dim=-1)
         end_preds = outputs['end_logits'].argmax(dim=-1)
-        
+
         # Process first example in batch
         input_ids = batch['input_ids'][0].cpu().tolist()
-        start_pred = start_preds[0].item()
-        end_pred = end_preds[0].item()
-        start_gold = batch['start_labels'][0].item()
-        end_gold = batch['end_labels'][0].item()
+        start_pred = int(start_preds[0].item())
+        end_pred = int(end_preds[0].item())
+        start_gold = int(batch['start_labels'][0].item())
+        end_gold = int(batch['end_labels'][0].item())
         
         # Decode text (skip special tokens)
         text_tokens = [self.train_loader.dataset.tokenizer.idx2token.get(idx, '?') 
