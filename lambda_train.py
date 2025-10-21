@@ -983,13 +983,13 @@ class Trainer:
     #Main training orchestrator with checkpointing, logging, and evaluation.
     #
     
-    def __init__(self, config: TrainingConfig, model: nn.Module, 
+    def __init__(self, config: TrainingConfig, model: nn.Module,
                  train_loader: DataLoader, val_loader: Optional[DataLoader],
                  device: torch.device):
         self.config = config
-        self.model = model
-        self.train_loader = train_loader
-        self.val_loader = val_loader
+        self.model: nn.Module = model
+        self.train_loader: DataLoader = train_loader
+        self.val_loader: Optional[DataLoader] = val_loader
         self.device = device
         
         # Setup optimizer
@@ -1160,8 +1160,9 @@ class Trainer:
     def _rebuild_dataloader(self):
         #Rebuild train_loader with updated batch_tokens config.#
         dataset = self.train_loader.dataset
+        assert isinstance(dataset, LambdaDataset), "Dataset must be LambdaDataset"
         tokenizer = dataset.tokenizer
-        
+
         # Create new sampler with updated budget
         sampler = TokenBudgetBatchSampler(dataset, self.config.batch_tokens, shuffle=True)
         
@@ -1280,7 +1281,9 @@ class Trainer:
         end_gold = int(batch['end_labels'][0].item())
         
         # Decode text (skip special tokens)
-        text_tokens = [self.train_loader.dataset.tokenizer.idx2token.get(idx, '?') 
+        dataset = self.train_loader.dataset
+        assert isinstance(dataset, LambdaDataset), "Dataset must be LambdaDataset"
+        text_tokens = [dataset.tokenizer.idx2token.get(idx, '?')
                       for idx in input_ids[1:-1]]  # Skip BOS/EOS
         text = ''.join(text_tokens)
         
@@ -1404,7 +1407,7 @@ def print_system_info(config: TrainingConfig, model: nn.Module):
     
     if device.type == 'cuda':
         print(f"GPU: {torch.cuda.get_device_name(0)}")
-        print(f"CUDA: {torch.version.cuda}")
+        print(f"CUDA: {torch.version.cuda}")  # type: ignore
         print(f"Total VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
     
     # Precision
@@ -1424,7 +1427,7 @@ def print_system_info(config: TrainingConfig, model: nn.Module):
     print(f"Gradient Checkpointing: {gc_status}")
     
     # Model parameters
-    params = model.count_parameters()
+    params = model.count_parameters()  # type: ignore
     print(f"\nModel Parameters: {params:,} ({params/1e6:.1f}M)")
     
     # Training config
