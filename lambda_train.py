@@ -492,37 +492,46 @@ class RotaryEmbedding(nn.Module):
 
     def __init__(self, dim: int, max_seq_len: int = 8192):
         super().__init__()
+        # dim is head_dim (d_model // n_heads)
+        # We need dim//2 frequencies for rotating dim//2 pairs
         inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim))
         self.register_buffer('inv_freq', inv_freq)
         self.max_seq_len = max_seq_len
 
         # Pre-compute positional encodings
         t = torch.arange(max_seq_len, dtype=torch.float)
-        freqs = torch.outer(t, inv_freq)
-        emb = torch.cat([freqs, freqs], dim=-1)
-        self.register_buffer('cos_cached', emb.cos())
-        self.register_buffer('sin_cached', emb.sin())
+        freqs = torch.outer(t, inv_freq)  # (max_seq_len, dim//2)
+        # Don't concatenate! Keep shape as (seq_len, dim//2)
+        self.register_buffer('cos_cached', freqs.cos())
+        self.register_buffer('sin_cached', freqs.sin())
 
         # Type hints for buffers (for IDE type checking)
         self.cos_cached: torch.Tensor
         self.sin_cached: torch.Tensor
         self.inv_freq: torch.Tensor
-    
+
     def forward(self, x: torch.Tensor, seq_len: int) -> Tuple[torch.Tensor, torch.Tensor]:
         return self.cos_cached[:seq_len], self.sin_cached[:seq_len]
 
 
 def apply_rotary_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    #Apply rotary embeddings to input tensor.#
+    #Apply rotary embeddings to input tensor.
+    #
+    #Args:
+    #  x: (B, n_heads, L, head_dim) - query or key tensor
+    #  cos: (1, 1, L, head_dim//2) - cosine of rotation angles
+    #  sin: (1, 1, L, head_dim//2) - sine of rotation angles
+    #
+    #Returns:
+    #  Rotated tensor of same shape as x
+    #
     # Split input into even/odd dimensions
-    x1, x2 = x[..., ::2], x[..., 1::2]
-    # Split cos/sin to match the split dimensions
-    cos = cos[..., ::2]
-    sin = sin[..., ::2]
-    # Rotate pairs
+    x1, x2 = x[..., ::2], x[..., 1::2]  # Each has shape (..., head_dim//2)
+    # cos and sin already have shape (..., head_dim//2), no need to split!
+    # Rotate pairs: [x1, x2] -> [x1*cos - x2*sin, x1*sin + x2*cos]
     rx1 = x1 * cos - x2 * sin
     rx2 = x1 * sin + x2 * cos
-    # Interleave back
+    # Interleave back to shape (..., head_dim)
     return torch.stack([rx1, rx2], dim=-1).flatten(-2)
 
 
