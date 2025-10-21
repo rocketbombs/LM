@@ -3,7 +3,7 @@
 #Lambda Calculus β-Reduction Span Predictor Training Script
 #===========================================================
 #
-#Production-grade training of a ~700M parameter model for predicting redex spans
+#Production-grade training of transformer models for predicting redex spans
 #in λ-calculus terms under Levy-like reduction strategies.
 #
 #Architecture: Encoder-only Transformer with dual pointer heads optimized for
@@ -12,7 +12,7 @@
 #Design rationale:
 #  - Encoder-only selected over encoder-decoder: λ-terms are already fully
 #    rendered; no generation needed, only pointer selection over fixed input.
-#  - Right-sized architecture (18 layers × 1536 dim) provides ~700M params,
+#  - Default architecture (12 layers × 768 dim) provides ~150M params,
 #    optimal for 16GB VRAM with gradient checkpointing and 8-bit Adam.
 #  - RoPE positional encoding provides strong contextual representations for
 #    nested parenthetical structure in λ-calculus terms.
@@ -26,7 +26,8 @@
 #  - Dynamic batching to token budgets prevents OOM on long sequences
 #  - BF16 mixed precision for numerical stability on reduction chains
 #
-#Target: ~700M params, fits training with batch-tokens=24576 on RTX 5080.
+#Default: ~150M params, fits comfortably on 16GB GPUs with batch-tokens=24576.
+#For larger models (700M+), use 24GB+ VRAM with increased d_model/n_layers.
 #
 
 import argparse
@@ -82,27 +83,28 @@ class TrainingConfig:
     wd: float = 0.01
     optimizer: str = 'adam8bit'
     grad_clip: float = 1.0
-    
-    # Model architecture (right-sized for ~700M params)
-    d_model: int = 1536
-    n_layers: int = 18
-    n_heads: int = 12
-    d_ff: int = 6144  # 4x for GLU
+
+    # Model architecture (right-sized for ~150M params, fits 16GB GPU)
+    # For larger models on 24GB+ GPUs, try: d_model=1536, n_layers=18, n_heads=12, d_ff=6144
+    d_model: int = 768
+    n_layers: int = 12
+    n_heads: int = 8
+    d_ff: int = 3072  # 4x for GLU
     dropout: float = 0.0
     drop_path: float = 0.1
     pos_encoding: str = 'rope'
     norm_type: str = 'rmsnorm'  # rmsnorm, layernorm
-    
+
     # Loss weights
     alpha_ce: float = 0.8
     alpha_iou: float = 0.2
     label_smoothing: float = 0.05
     iou_window: int = 2
     nf_weight: float = 0.2  # Weight for normal form classification loss
-    
+
     # Hardware
     amp: str = 'bf16'  # bf16, fp16, off
-    grad_checkpoint: bool = False
+    grad_checkpoint: bool = True  # Enable by default to save memory
     compile: bool = False
     flash: bool = True
     
@@ -659,8 +661,9 @@ class LambdaSpanPredictor(nn.Module):
     #
     #Encoder-only Transformer for λ-calculus redex span prediction.
     #
-    #Architecture: 32-layer encoder (3072 dim, 24 heads) with dual pointer heads
-    #for start/end span prediction. Total params ≈ 700M.
+    #Default architecture: 12-layer encoder (768 dim, 8 heads) with dual pointer heads
+    #for start/end span prediction. Total params ≈ 150M.
+    #Configurable via TrainingConfig for larger models on higher-VRAM GPUs.
     #
     #Key design choices:
     #- RoPE positional encoding: Handles variable-length nested structures better
@@ -1181,8 +1184,11 @@ class Trainer:
                 for k, v in batch.items()}
         
         # Forward pass with AMP
-        amp_enabled = self.amp_dtype is not None
-        with autocast(enabled=amp_enabled, dtype=self.amp_dtype if amp_enabled else torch.float32):
+        if self.amp_dtype is not None:
+            with autocast(enabled=True, dtype=self.amp_dtype):
+                outputs = self.model(batch['input_ids'], batch['attention_mask'])
+                loss, loss_dict = compute_total_loss(outputs, batch, self.config)
+        else:
             outputs = self.model(batch['input_ids'], batch['attention_mask'])
             loss, loss_dict = compute_total_loss(outputs, batch, self.config)
         
@@ -1226,8 +1232,11 @@ class Trainer:
                 batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v
                         for k, v in batch.items()}
 
-                amp_enabled = self.amp_dtype is not None
-                with autocast(enabled=amp_enabled, dtype=self.amp_dtype if amp_enabled else torch.float32):
+                if self.amp_dtype is not None:
+                    with autocast(enabled=True, dtype=self.amp_dtype):
+                        outputs = self.model(batch['input_ids'], batch['attention_mask'])
+                        loss, loss_dict = compute_total_loss(outputs, batch, self.config)
+                else:
                     outputs = self.model(batch['input_ids'], batch['attention_mask'])
                     loss, loss_dict = compute_total_loss(outputs, batch, self.config)
                 
