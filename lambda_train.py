@@ -49,7 +49,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.checkpoint import checkpoint as gradient_checkpoint
 
@@ -514,7 +514,11 @@ class RotaryEmbedding(nn.Module):
 
 def apply_rotary_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     #Apply rotary embeddings to input tensor.#
+    # Split input into even/odd dimensions
     x1, x2 = x[..., ::2], x[..., 1::2]
+    # Split cos/sin to match the split dimensions
+    cos = cos[..., ::2]
+    sin = sin[..., ::2]
     # Rotate pairs
     rx1 = x1 * cos - x2 * sin
     rx2 = x1 * sin + x2 * cos
@@ -1186,7 +1190,7 @@ class Trainer:
         
         # Forward pass with AMP
         if self.amp_dtype is not None:
-            with autocast(enabled=True, dtype=self.amp_dtype):
+            with autocast(device_type='cuda', enabled=True, dtype=self.amp_dtype):
                 outputs = self.model(batch['input_ids'], batch['attention_mask'])
                 loss, loss_dict = compute_total_loss(outputs, batch, self.config)
         else:
@@ -1234,7 +1238,7 @@ class Trainer:
                         for k, v in batch.items()}
 
                 if self.amp_dtype is not None:
-                    with autocast(enabled=True, dtype=self.amp_dtype):
+                    with autocast(device_type='cuda', enabled=True, dtype=self.amp_dtype):
                         outputs = self.model(batch['input_ids'], batch['attention_mask'])
                         loss, loss_dict = compute_total_loss(outputs, batch, self.config)
                 else:
