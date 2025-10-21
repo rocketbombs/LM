@@ -54,9 +54,10 @@ from torch.utils.checkpoint import checkpoint as gradient_checkpoint
 
 # Optional dependencies with graceful fallbacks
 try:
-    import bitsandbytes as bnb
+    import bitsandbytes as bnb  # type: ignore
     BITSANDBYTES_AVAILABLE = True
 except ImportError:
+    bnb = None  # type: ignore
     BITSANDBYTES_AVAILABLE = False
 
 # ============================================================================
@@ -829,7 +830,7 @@ def compute_soft_iou_loss(start_logits: torch.Tensor, end_logits: torch.Tensor,
     def make_soft_target(labels: torch.Tensor) -> torch.Tensor:
         soft = torch.zeros(B, L, device=device)
         for i in range(B):
-            center = labels[i].item()
+            center = int(labels[i].item())
             for offset in range(-window, window + 1):
                 idx = center + offset
                 if 0 <= idx < L:
@@ -1032,7 +1033,7 @@ class Trainer:
         
         if self.config.optimizer == 'adam8bit' and BITSANDBYTES_AVAILABLE:
             print("Using 8-bit AdamW optimizer")
-            return bnb.optim.AdamW8bit(
+            return bnb.optim.AdamW8bit(  # type: ignore
                 params, lr=self.config.lr, weight_decay=self.config.wd
             )
         else:
@@ -1180,7 +1181,8 @@ class Trainer:
                 for k, v in batch.items()}
         
         # Forward pass with AMP
-        with autocast(device_type='cuda', dtype=self.amp_dtype, enabled=self.amp_dtype is not None):
+        amp_enabled = self.amp_dtype is not None
+        with autocast(enabled=amp_enabled, dtype=self.amp_dtype if amp_enabled else torch.float32):
             outputs = self.model(batch['input_ids'], batch['attention_mask'])
             loss, loss_dict = compute_total_loss(outputs, batch, self.config)
         
@@ -1224,7 +1226,8 @@ class Trainer:
                 batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v
                         for k, v in batch.items()}
 
-                with autocast(device_type='cuda', dtype=self.amp_dtype, enabled=self.amp_dtype is not None):
+                amp_enabled = self.amp_dtype is not None
+                with autocast(enabled=amp_enabled, dtype=self.amp_dtype if amp_enabled else torch.float32):
                     outputs = self.model(batch['input_ids'], batch['attention_mask'])
                     loss, loss_dict = compute_total_loss(outputs, batch, self.config)
                 
