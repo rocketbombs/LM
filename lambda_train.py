@@ -3,7 +3,7 @@
 #Lambda Calculus β-Reduction Span Predictor Training Script
 #===========================================================
 #
-#Production-grade training of a ~700M parameter model for predicting redex spans
+#Production-grade training of transformer models for predicting redex spans
 #in λ-calculus terms under Levy-like reduction strategies.
 #
 #Architecture: Encoder-only Transformer with dual pointer heads optimized for
@@ -12,7 +12,7 @@
 #Design rationale:
 #  - Encoder-only selected over encoder-decoder: λ-terms are already fully
 #    rendered; no generation needed, only pointer selection over fixed input.
-#  - Right-sized architecture (18 layers × 1536 dim) provides ~700M params,
+#  - Default architecture (12 layers × 768 dim) provides ~150M params,
 #    optimal for 16GB VRAM with gradient checkpointing and 8-bit Adam.
 #  - RoPE positional encoding provides strong contextual representations for
 #    nested parenthetical structure in λ-calculus terms.
@@ -26,7 +26,8 @@
 #  - Dynamic batching to token budgets prevents OOM on long sequences
 #  - BF16 mixed precision for numerical stability on reduction chains
 #
-#Target: ~700M params, fits training with batch-tokens=24576 on RTX 5080.
+#Default: ~150M params, fits comfortably on 16GB GPUs with batch-tokens=24576.
+#For larger models (700M+), use 24GB+ VRAM with increased d_model/n_layers.
 #
 
 import argparse
@@ -48,15 +49,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.checkpoint import checkpoint as gradient_checkpoint
 
 # Optional dependencies with graceful fallbacks
 try:
-    import bitsandbytes as bnb
+    import bitsandbytes as bnb  # type: ignore
     BITSANDBYTES_AVAILABLE = True
 except ImportError:
+    bnb = None  # type: ignore
     BITSANDBYTES_AVAILABLE = False
 
 # ============================================================================
@@ -81,27 +83,28 @@ class TrainingConfig:
     wd: float = 0.01
     optimizer: str = 'adam8bit'
     grad_clip: float = 1.0
-    
-    # Model architecture (right-sized for ~700M params)
-    d_model: int = 1536
-    n_layers: int = 18
-    n_heads: int = 12
-    d_ff: int = 6144  # 4x for GLU
+
+    # Model architecture (right-sized for ~150M params, fits 16GB GPU)
+    # For larger models on 24GB+ GPUs, try: d_model=1536, n_layers=18, n_heads=12, d_ff=6144
+    d_model: int = 768
+    n_layers: int = 12
+    n_heads: int = 8
+    d_ff: int = 3072  # 4x for GLU
     dropout: float = 0.0
     drop_path: float = 0.1
     pos_encoding: str = 'rope'
     norm_type: str = 'rmsnorm'  # rmsnorm, layernorm
-    
+
     # Loss weights
     alpha_ce: float = 0.8
     alpha_iou: float = 0.2
     label_smoothing: float = 0.05
     iou_window: int = 2
     nf_weight: float = 0.2  # Weight for normal form classification loss
-    
+
     # Hardware
     amp: str = 'bf16'  # bf16, fp16, off
-    grad_checkpoint: bool = False
+    grad_checkpoint: bool = True  # Enable by default to save memory
     compile: bool = False
     flash: bool = True
     
@@ -486,19 +489,24 @@ class RMSNorm(nn.Module):
 
 
 class RotaryEmbedding(nn.Module):
-    
+
     def __init__(self, dim: int, max_seq_len: int = 8192):
         super().__init__()
         inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim))
         self.register_buffer('inv_freq', inv_freq)
         self.max_seq_len = max_seq_len
-        
+
         # Pre-compute positional encodings
         t = torch.arange(max_seq_len, dtype=torch.float)
         freqs = torch.outer(t, inv_freq)
         emb = torch.cat([freqs, freqs], dim=-1)
         self.register_buffer('cos_cached', emb.cos())
         self.register_buffer('sin_cached', emb.sin())
+
+        # Type hints for buffers (for IDE type checking)
+        self.cos_cached: torch.Tensor
+        self.sin_cached: torch.Tensor
+        self.inv_freq: torch.Tensor
     
     def forward(self, x: torch.Tensor, seq_len: int) -> Tuple[torch.Tensor, torch.Tensor]:
         return self.cos_cached[:seq_len], self.sin_cached[:seq_len]
@@ -506,7 +514,11 @@ class RotaryEmbedding(nn.Module):
 
 def apply_rotary_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     #Apply rotary embeddings to input tensor.#
+    # Split input into even/odd dimensions
     x1, x2 = x[..., ::2], x[..., 1::2]
+    # Split cos/sin to match the split dimensions
+    cos = cos[..., ::2]
+    sin = sin[..., ::2]
     # Rotate pairs
     rx1 = x1 * cos - x2 * sin
     rx2 = x1 * sin + x2 * cos
@@ -554,7 +566,7 @@ class MultiHeadAttention(nn.Module):
         q, k, v = qkv.unbind(dim=2)
         
         # Apply RoPE if provided
-        if rope_cos is not None:
+        if rope_cos is not None and rope_sin is not None:
             q = apply_rotary_emb(q, rope_cos, rope_sin)
             k = apply_rotary_emb(k, rope_cos, rope_sin)
         
@@ -653,8 +665,9 @@ class LambdaSpanPredictor(nn.Module):
     #
     #Encoder-only Transformer for λ-calculus redex span prediction.
     #
-    #Architecture: 32-layer encoder (3072 dim, 24 heads) with dual pointer heads
-    #for start/end span prediction. Total params ≈ 700M.
+    #Default architecture: 12-layer encoder (768 dim, 8 heads) with dual pointer heads
+    #for start/end span prediction. Total params ≈ 150M.
+    #Configurable via TrainingConfig for larger models on higher-VRAM GPUs.
     #
     #Key design choices:
     #- RoPE positional encoding: Handles variable-length nested structures better
@@ -705,7 +718,7 @@ class LambdaSpanPredictor(nn.Module):
         # Enable gradient checkpointing if requested
         if config.grad_checkpoint:
             for block in self.blocks:
-                block.use_ckpt = True
+                setattr(block, 'use_ckpt', True)
         
         # Prediction heads
         self.start_head = nn.Linear(config.d_model, 1)
@@ -824,7 +837,7 @@ def compute_soft_iou_loss(start_logits: torch.Tensor, end_logits: torch.Tensor,
     def make_soft_target(labels: torch.Tensor) -> torch.Tensor:
         soft = torch.zeros(B, L, device=device)
         for i in range(B):
-            center = labels[i].item()
+            center = int(labels[i].item())
             for offset in range(-window, window + 1):
                 idx = center + offset
                 if 0 <= idx < L:
@@ -974,13 +987,13 @@ class Trainer:
     #Main training orchestrator with checkpointing, logging, and evaluation.
     #
     
-    def __init__(self, config: TrainingConfig, model: nn.Module, 
+    def __init__(self, config: TrainingConfig, model: nn.Module,
                  train_loader: DataLoader, val_loader: Optional[DataLoader],
                  device: torch.device):
         self.config = config
-        self.model = model
-        self.train_loader = train_loader
-        self.val_loader = val_loader
+        self.model: nn.Module = model
+        self.train_loader: DataLoader = train_loader
+        self.val_loader: Optional[DataLoader] = val_loader
         self.device = device
         
         # Setup optimizer
@@ -1027,7 +1040,7 @@ class Trainer:
         
         if self.config.optimizer == 'adam8bit' and BITSANDBYTES_AVAILABLE:
             print("Using 8-bit AdamW optimizer")
-            return bnb.optim.AdamW8bit(
+            return bnb.optim.AdamW8bit(  # type: ignore
                 params, lr=self.config.lr, weight_decay=self.config.wd
             )
         else:
@@ -1151,8 +1164,9 @@ class Trainer:
     def _rebuild_dataloader(self):
         #Rebuild train_loader with updated batch_tokens config.#
         dataset = self.train_loader.dataset
+        assert isinstance(dataset, LambdaDataset), "Dataset must be LambdaDataset"
         tokenizer = dataset.tokenizer
-        
+
         # Create new sampler with updated budget
         sampler = TokenBudgetBatchSampler(dataset, self.config.batch_tokens, shuffle=True)
         
@@ -1175,7 +1189,11 @@ class Trainer:
                 for k, v in batch.items()}
         
         # Forward pass with AMP
-        with autocast('cuda', dtype=self.amp_dtype, enabled=self.amp_dtype is not None):
+        if self.amp_dtype is not None:
+            with autocast(device_type='cuda', enabled=True, dtype=self.amp_dtype):
+                outputs = self.model(batch['input_ids'], batch['attention_mask'])
+                loss, loss_dict = compute_total_loss(outputs, batch, self.config)
+        else:
             outputs = self.model(batch['input_ids'], batch['attention_mask'])
             loss, loss_dict = compute_total_loss(outputs, batch, self.config)
         
@@ -1216,10 +1234,14 @@ class Trainer:
 
         with torch.no_grad():
             for batch_idx, batch in enumerate(self.val_loader):
-                batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v 
+                batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v
                         for k, v in batch.items()}
-                
-                with autocast('cuda', dtype=self.amp_dtype, enabled=self.amp_dtype is not None):
+
+                if self.amp_dtype is not None:
+                    with autocast(device_type='cuda', enabled=True, dtype=self.amp_dtype):
+                        outputs = self.model(batch['input_ids'], batch['attention_mask'])
+                        loss, loss_dict = compute_total_loss(outputs, batch, self.config)
+                else:
                     outputs = self.model(batch['input_ids'], batch['attention_mask'])
                     loss, loss_dict = compute_total_loss(outputs, batch, self.config)
                 
@@ -1254,16 +1276,18 @@ class Trainer:
         # Get predictions
         start_preds = outputs['start_logits'].argmax(dim=-1)
         end_preds = outputs['end_logits'].argmax(dim=-1)
-        
+
         # Process first example in batch
         input_ids = batch['input_ids'][0].cpu().tolist()
-        start_pred = start_preds[0].item()
-        end_pred = end_preds[0].item()
-        start_gold = batch['start_labels'][0].item()
-        end_gold = batch['end_labels'][0].item()
+        start_pred = int(start_preds[0].item())
+        end_pred = int(end_preds[0].item())
+        start_gold = int(batch['start_labels'][0].item())
+        end_gold = int(batch['end_labels'][0].item())
         
         # Decode text (skip special tokens)
-        text_tokens = [self.train_loader.dataset.tokenizer.idx2token.get(idx, '?') 
+        dataset = self.train_loader.dataset
+        assert isinstance(dataset, LambdaDataset), "Dataset must be LambdaDataset"
+        text_tokens = [dataset.tokenizer.idx2token.get(idx, '?')
                       for idx in input_ids[1:-1]]  # Skip BOS/EOS
         text = ''.join(text_tokens)
         
@@ -1387,7 +1411,7 @@ def print_system_info(config: TrainingConfig, model: nn.Module):
     
     if device.type == 'cuda':
         print(f"GPU: {torch.cuda.get_device_name(0)}")
-        print(f"CUDA: {torch.version.cuda}")
+        print(f"CUDA: {torch.version.cuda}")  # type: ignore
         print(f"Total VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
     
     # Precision
@@ -1407,7 +1431,7 @@ def print_system_info(config: TrainingConfig, model: nn.Module):
     print(f"Gradient Checkpointing: {gc_status}")
     
     # Model parameters
-    params = model.count_parameters()
+    params = model.count_parameters()  # type: ignore
     print(f"\nModel Parameters: {params:,} ({params/1e6:.1f}M)")
     
     # Training config
