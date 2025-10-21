@@ -12,8 +12,8 @@
 #Design rationale:
 #  - Encoder-only selected over encoder-decoder: λ-terms are already fully
 #    rendered; no generation needed, only pointer selection over fixed input.
-#  - Default architecture (12 layers × 768 dim) provides ~150M params,
-#    optimal for 16GB VRAM with gradient checkpointing and 8-bit Adam.
+#  - Default architecture (8 layers × 768 dim) provides ~75M params,
+#    very memory-efficient for 16GB VRAM with gradient checkpointing and 8-bit Adam.
 #  - RoPE positional encoding provides strong contextual representations for
 #    nested parenthetical structure in λ-calculus terms.
 #  - Dual pointer mechanism (start/end) mirrors successful approaches in QA
@@ -26,8 +26,8 @@
 #  - Dynamic batching to token budgets prevents OOM on long sequences
 #  - BF16 mixed precision for numerical stability on reduction chains
 #
-#Default: ~150M params, fits comfortably on 16GB GPUs with batch-tokens=24576.
-#For larger models (700M+), use 24GB+ VRAM with increased d_model/n_layers.
+#Default: ~75M params, fits comfortably on 16GB GPUs with batch-tokens=16384.
+#For larger models, increase d_model/n_layers: 150M (d=768,L=12), 700M (d=1536,L=18).
 #
 
 import argparse
@@ -77,17 +77,17 @@ class TrainingConfig:
     
     # Training
     epochs: int = 3
-    batch_tokens: int = 24576
+    batch_tokens: int = 16384  # Conservative default for 16GB GPU
     lr: float = 3e-4
     warmup: int = 2000
     wd: float = 0.01
     optimizer: str = 'adam8bit'
     grad_clip: float = 1.0
 
-    # Model architecture (right-sized for ~150M params, fits 16GB GPU)
-    # For larger models on 24GB+ GPUs, try: d_model=1536, n_layers=18, n_heads=12, d_ff=6144
+    # Model architecture (right-sized for ~75M params, very memory-efficient)
+    # For larger models: d_model=768 n_layers=12 (150M) or d_model=1536 n_layers=18 (700M)
     d_model: int = 768
-    n_layers: int = 12
+    n_layers: int = 8
     n_heads: int = 8
     d_ff: int = 3072  # 4x for GLU
     dropout: float = 0.0
@@ -138,17 +138,17 @@ def parse_args() -> TrainingConfig:
     
     # Training
     parser.add_argument('--epochs', type=int, default=3)
-    parser.add_argument('--batch-tokens', type=int, default=24576, help='Token budget per step')
+    parser.add_argument('--batch-tokens', type=int, default=16384, help='Token budget per step')
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--warmup', type=int, default=2000, help='Warmup steps')
     parser.add_argument('--wd', type=float, default=0.01, help='Weight decay')
     parser.add_argument('--optimizer', choices=['adamw', 'adam8bit'], default='adam8bit')
     parser.add_argument('--grad-clip', type=float, default=1.0)
-    
+
     # Model
-    parser.add_argument('--d-model', type=int, default=1536)
-    parser.add_argument('--n-layers', type=int, default=18)
-    parser.add_argument('--n-heads', type=int, default=12)
+    parser.add_argument('--d-model', type=int, default=768)
+    parser.add_argument('--n-layers', type=int, default=8)
+    parser.add_argument('--n-heads', type=int, default=8)
     parser.add_argument('--norm-type', choices=['rmsnorm', 'layernorm'], default='rmsnorm')
     
     # Hardware
@@ -665,8 +665,8 @@ class LambdaSpanPredictor(nn.Module):
     #
     #Encoder-only Transformer for λ-calculus redex span prediction.
     #
-    #Default architecture: 12-layer encoder (768 dim, 8 heads) with dual pointer heads
-    #for start/end span prediction. Total params ≈ 150M.
+    #Default architecture: 8-layer encoder (768 dim, 8 heads) with dual pointer heads
+    #for start/end span prediction. Total params ≈ 75M.
     #Configurable via TrainingConfig for larger models on higher-VRAM GPUs.
     #
     #Key design choices:
