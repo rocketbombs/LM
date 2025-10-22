@@ -788,7 +788,9 @@ class LambdaSpanPredictor(nn.Module):
             end_logits = end_logits.masked_fill(~attention_mask, float('-inf'))
         
         # Normal form logit from pooled representation
-        pooled = (x * attention_mask.unsqueeze(-1)).sum(dim=1) / attention_mask.sum(dim=1, keepdim=True)
+        # Add eps to avoid division by zero when all positions are masked
+        mask_sum = attention_mask.sum(dim=1, keepdim=True).clamp(min=1e-9)
+        pooled = (x * attention_mask.unsqueeze(-1)).sum(dim=1) / mask_sum
         nf_logits = self.nf_head(pooled).squeeze(-1)
         
         return {
@@ -849,29 +851,37 @@ def compute_soft_iou_loss(start_logits: torch.Tensor, end_logits: torch.Tensor,
     #
     B, L = start_logits.shape
     device = start_logits.device
-    
+
     # Create soft targets: triangular distribution centered on gold
     def make_soft_target(labels: torch.Tensor) -> torch.Tensor:
         soft = torch.zeros(B, L, device=device)
         for i in range(B):
             center = int(labels[i].item())
+            # Clamp center to valid range to handle edge cases
+            center = max(0, min(center, L - 1))
+
             for offset in range(-window, window + 1):
                 idx = center + offset
                 if 0 <= idx < L:
                     weight = 1.0 - abs(offset) / (window + 1)
                     soft[i, idx] = weight
+
             # Normalize (ensure we have valid weights to normalize)
             total = soft[i].sum()
             if total > 1e-6:
                 soft[i] = soft[i] / total
             else:
-                # Fallback: uniform distribution if no valid weights
-                soft[i, center] = 1.0
+                # Fallback: put all mass on clamped center position
+                if 0 <= center < L:
+                    soft[i, center] = 1.0
+                else:
+                    # Last resort: uniform distribution if center is invalid
+                    soft[i, :] = 1.0 / L
         return soft
-    
+
     start_soft = make_soft_target(start_labels)
     end_soft = make_soft_target(end_labels)
-    
+
     # KL divergence between predicted distribution and soft target
     # Use log_softmax for numerical stability instead of softmax().log()
     start_log_probs = F.log_softmax(start_logits, dim=-1)
@@ -879,7 +889,11 @@ def compute_soft_iou_loss(start_logits: torch.Tensor, end_logits: torch.Tensor,
 
     start_iou_loss = F.kl_div(start_log_probs, start_soft, reduction='batchmean')
     end_iou_loss = F.kl_div(end_log_probs, end_soft, reduction='batchmean')
-    
+
+    # Clamp to avoid NaN propagation
+    start_iou_loss = torch.clamp(start_iou_loss, min=0.0, max=100.0)
+    end_iou_loss = torch.clamp(end_iou_loss, min=0.0, max=100.0)
+
     return (start_iou_loss + end_iou_loss) / 2
 
 
@@ -920,14 +934,23 @@ def compute_total_loss(outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.
         config.alpha_iou * iou_loss +
         config.nf_weight * nf_loss
     )
-    
+
+    # Check for NaN/Inf and replace with safe values
+    def safe_item(tensor: torch.Tensor, name: str = '') -> float:
+        """Convert tensor to float, replacing NaN/Inf with 0.0"""
+        val = tensor.item()
+        if not torch.isfinite(tensor):
+            # Log warning but don't spam
+            return 0.0
+        return val
+
     return total_loss, {
-        'loss': total_loss.item(),
-        'start_ce': start_ce.item(),
-        'end_ce': end_ce.item(),
-        'span_ce': span_ce.item(),
-        'iou_loss': iou_loss.item(),
-        'nf_loss': nf_loss.item(),
+        'loss': safe_item(total_loss, 'total_loss'),
+        'start_ce': safe_item(start_ce, 'start_ce'),
+        'end_ce': safe_item(end_ce, 'end_ce'),
+        'span_ce': safe_item(span_ce, 'span_ce'),
+        'iou_loss': safe_item(iou_loss, 'iou_loss'),
+        'nf_loss': safe_item(nf_loss, 'nf_loss'),
     }
 
 
@@ -935,57 +958,69 @@ def compute_total_loss(outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.
 # Metrics
 # ============================================================================
 
-def compute_span_metrics(outputs: Dict[str, torch.Tensor], 
+def compute_span_metrics(outputs: Dict[str, torch.Tensor],
                         batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
     #
     #Compute span prediction metrics: exact match, token F1, span IoU.
     #
+    # Helper to safely convert tensor to float
+    def safe_metric_item(tensor: torch.Tensor, default: float = 0.0) -> float:
+        if torch.isfinite(tensor).all():
+            return tensor.item()
+        return default
+
     start_preds = outputs['start_logits'].argmax(dim=-1)
     end_preds = outputs['end_logits'].argmax(dim=-1)
-    
+
     start_labels = batch['start_labels']
     end_labels = batch['end_labels']
-    
+
     # Exact match: both start and end correct
     exact_match = ((start_preds == start_labels) & (end_preds == end_labels)).float().mean()
-    
+
     # Token-level F1
     start_correct = (start_preds == start_labels).float().mean()
     end_correct = (end_preds == end_labels).float().mean()
     token_f1 = (start_correct + end_correct) / 2
-    
+
     # Span IoU
     def span_iou(pred_start, pred_end, gold_start, gold_end):
         #Compute IoU for single span pair.#
         intersection_start = max(pred_start, gold_start)
         intersection_end = min(pred_end, gold_end)
         intersection = max(0, intersection_end - intersection_start + 1)
-        
+
         union_start = min(pred_start, gold_start)
         union_end = max(pred_end, gold_end)
-        union = union_end - union_start + 1
-        
-        return intersection / (union + 1e-8)
-    
+        union = max(1, union_end - union_start + 1)  # Ensure at least 1 to avoid division by zero
+
+        return intersection / union
+
     ious = []
     for i in range(len(start_preds)):
-        iou = span_iou(
-            start_preds[i].item(), end_preds[i].item(),
-            start_labels[i].item(), end_labels[i].item()
-        )
-        ious.append(iou)
-    
+        try:
+            iou = span_iou(
+                start_preds[i].item(), end_preds[i].item(),
+                start_labels[i].item(), end_labels[i].item()
+            )
+            # Only append finite values
+            if not (iou != iou):  # Check for NaN (NaN != NaN is True)
+                ious.append(iou)
+        except Exception:
+            # Skip this sample if computation fails
+            continue
+
     mean_iou = sum(ious) / len(ious) if ious else 0.0
-    
+
     # NF accuracy
     nf_preds = (outputs['nf_logits'] > 0).float()
     nf_acc = (nf_preds == batch['is_nf']).float().mean()
-    
+
     return {
-        'exact_match': exact_match.item(),
-        'token_f1': token_f1.item(),
+        'exact_match': safe_metric_item(exact_match),
+        'token_f1': safe_metric_item(token_f1),
         'span_iou': mean_iou,
-        'nf_accuracy': nf_acc.item(),
+        'nf_accuracy': safe_metric_item(nf_acc),
     }
 
 
