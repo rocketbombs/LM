@@ -525,6 +525,9 @@ class GraphReducer:
         self.thunk_hits = 0
         # Track evaluated thunks separately to avoid mutating nodes
         self.thunk_cache: Dict[int, GraphNode] = {}
+        # Depth limiting to prevent infinite recursion
+        self.instantiate_depth = 0
+        self.max_instantiate_depth = 1000
     
     def term_to_graph(self, term: Term, env: Optional[List[GraphNode]] = None) -> GraphNode:
         #Convert tree term to graph node.#
@@ -581,8 +584,10 @@ class GraphReducer:
         #Apply β-reduction at path with thunk binding.#
         if not path:
             assert graph.kind == NodeKind.APP and graph.left.kind == NodeKind.ABS
-            arg_thunk = GraphNode(NodeKind.THUNK, body=graph.right, 
-                                env=graph.right.env, evaluated=False)
+            # Create thunk with CURRENT environment, not graph.right.env
+            # This ensures the argument is evaluated in the correct scope
+            arg_thunk = GraphNode(NodeKind.THUNK, body=graph.right,
+                                env=graph.env, evaluated=False)
             new_env = [arg_thunk] + (graph.left.env or [])
             return self._instantiate(graph.left.body, new_env)
         
@@ -600,17 +605,34 @@ class GraphReducer:
     
     def _instantiate(self, node: GraphNode, env: List[GraphNode]) -> GraphNode:
         #Instantiate node with new environment.#
-        if node.kind == NodeKind.VAR:
-            if node.var < len(env):
-                return self._force(env[node.var])
-            return GraphNode(NodeKind.VAR, var=node.var, env=env)
-        elif node.kind == NodeKind.ABS:
-            new_body = self._instantiate(node.body, env)
-            return GraphNode(NodeKind.ABS, body=new_body, env=env)
-        else:
-            new_left = self._instantiate(node.left, env)
-            new_right = self._instantiate(node.right, env)
-            return GraphNode(NodeKind.APP, left=new_left, right=new_right, env=env)
+        self.instantiate_depth += 1
+        if self.instantiate_depth > self.max_instantiate_depth:
+            self.instantiate_depth -= 1
+            # Hit depth limit - raise exception to abort this example
+            raise RecursionError(f"GraphReducer instantiate depth exceeded {self.max_instantiate_depth}")
+
+        try:
+            if node.kind == NodeKind.VAR:
+                if node.var is not None and node.var < len(env):
+                    result = self._force(env[node.var])
+                else:
+                    result = GraphNode(NodeKind.VAR, var=node.var if node.var is not None else 0, env=env)
+            elif node.kind == NodeKind.ABS:
+                if node.body:
+                    new_body = self._instantiate(node.body, env)
+                    result = GraphNode(NodeKind.ABS, body=new_body, env=env)
+                else:
+                    result = GraphNode(NodeKind.ABS, body=GraphNode(NodeKind.VAR, var=0), env=env)
+            else:  # APP
+                if node.left and node.right:
+                    new_left = self._instantiate(node.left, env)
+                    new_right = self._instantiate(node.right, env)
+                    result = GraphNode(NodeKind.APP, left=new_left, right=new_right, env=env)
+                else:
+                    result = GraphNode(NodeKind.VAR, var=0, env=[])
+            return result
+        finally:
+            self.instantiate_depth -= 1
     
     def _force(self, thunk: GraphNode) -> GraphNode:
         #Force a thunk, using external cache to avoid mutating nodes.#
