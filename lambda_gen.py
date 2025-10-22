@@ -127,34 +127,50 @@ class GraphNode:
     evaluated: bool = field(default=False)
     cache: Optional['GraphNode'] = field(default=None)
     
-    def to_tree(self) -> Term:
-        #Project graph node back to tree term for rendering.
-        
+    def to_tree(self, visited: Optional[set] = None) -> Term:
+        #Project graph node back to tree term for rendering with cycle detection.
+
         #Note: VAR nodes with THUNK bindings project the variable reference itself
         #to avoid premature expansion in trace views. The redex selection logic
         #operates on the projected tree, so this preserves correctness.
         #
-        if self.kind == NodeKind.VALUE:
-            return self.cache.to_tree() if self.cache else Term(TermType.VAR, var=0)
-        elif self.kind == NodeKind.THUNK:
-            if self.evaluated and self.cache:
-                return self.cache.to_tree()
-            elif self.body:
-                return self.body.to_tree()
+        if visited is None:
+            visited = set()
+
+        node_id = id(self)
+        if node_id in visited:
+            # Cycle detected - return a safe placeholder
             return Term(TermType.VAR, var=0)
+        visited.add(node_id)
+
+        if self.kind == NodeKind.VALUE:
+            result = self.cache.to_tree(visited) if self.cache else Term(TermType.VAR, var=0)
+        elif self.kind == NodeKind.THUNK:
+            # Check external cache status via node fields (kept for backward compat)
+            if self.evaluated and self.cache:
+                result = self.cache.to_tree(visited)
+            elif self.body:
+                result = self.body.to_tree(visited)
+            else:
+                result = Term(TermType.VAR, var=0)
         elif self.kind == NodeKind.VAR:
-            if self.env and self.var < len(self.env):
+            if self.env and self.var is not None and self.var < len(self.env):
                 binding = self.env[self.var]
                 if binding.kind == NodeKind.THUNK and not binding.evaluated:
-                    return Term(TermType.VAR, var=self.var)
-                return binding.to_tree()
-            return Term(TermType.VAR, var=self.var)
+                    result = Term(TermType.VAR, var=self.var)
+                else:
+                    result = binding.to_tree(visited)
+            else:
+                result = Term(TermType.VAR, var=self.var if self.var is not None else 0)
         elif self.kind == NodeKind.ABS:
-            return Term(TermType.ABS, body=self.body.to_tree() if self.body else Term(TermType.VAR, var=0))
-        else:
-            return Term(TermType.APP, 
-                       left=self.left.to_tree() if self.left else Term(TermType.VAR, var=0),
-                       right=self.right.to_tree() if self.right else Term(TermType.VAR, var=0))
+            result = Term(TermType.ABS, body=self.body.to_tree(visited) if self.body else Term(TermType.VAR, var=0))
+        else:  # APP
+            result = Term(TermType.APP,
+                       left=self.left.to_tree(visited) if self.left else Term(TermType.VAR, var=0),
+                       right=self.right.to_tree(visited) if self.right else Term(TermType.VAR, var=0))
+
+        visited.discard(node_id)
+        return result
 
 # ============================================================================
 # TERM GENERATION
@@ -498,15 +514,17 @@ class TreeReducer:
 
 class GraphReducer:
     #Call-by-need reduction with thunk memoization.
-    
+
     #Environment semantics: env lists are treated as immutable closures by design.
     #Child nodes receive the same env reference, which is read-only throughout.
     #
-    
+
     def __init__(self, max_steps: int):
         self.max_steps = max_steps
         self.thunk_evals = 0
         self.thunk_hits = 0
+        # Track evaluated thunks separately to avoid mutating nodes
+        self.thunk_cache: Dict[int, GraphNode] = {}
     
     def term_to_graph(self, term: Term, env: Optional[List[GraphNode]] = None) -> GraphNode:
         #Convert tree term to graph node.#
@@ -595,18 +613,18 @@ class GraphReducer:
             return GraphNode(NodeKind.APP, left=new_left, right=new_right, env=env)
     
     def _force(self, thunk: GraphNode) -> GraphNode:
-        #Force a thunk, updating cache on first eval.#
+        #Force a thunk, using external cache to avoid mutating nodes.#
         if thunk.kind != NodeKind.THUNK:
             return thunk
-        
-        if thunk.evaluated:
+
+        thunk_id = id(thunk)
+        if thunk_id in self.thunk_cache:
             self.thunk_hits += 1
-            return thunk.cache
-        
+            return self.thunk_cache[thunk_id]
+
         self.thunk_evals += 1
         value = self._instantiate(thunk.body, thunk.env)
-        thunk.evaluated = True
-        thunk.cache = value
+        self.thunk_cache[thunk_id] = value
         return value
 
 # ============================================================================
@@ -652,12 +670,12 @@ class Config:
     max_size: int = 50
     max_steps: int = 100
     share: bool = False
-    libraries: List[str] = None
+    libraries: Optional[List[str]] = None
     emit_next: bool = False
     emit_nf: bool = False
     emit_trace: bool = False
     allow_divergent: bool = False
-    seed: int = None
+    seed: Optional[int] = None
     
     def __post_init__(self):
         if self.libraries is None:
