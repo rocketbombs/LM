@@ -77,7 +77,7 @@ class TrainingConfig:
     truncate: str = 'tail'  # head, tail, middle
     
     # Training
-    epochs: int = 30  # Extended for stable long run
+    epochs: int = 100  # Extended for stable long run
     batch_tokens: int = 16384  # Conservative default for 16GB GPU
     lr: float = 5e-5  # Reduced for stability (was 3e-4)
     warmup: int = 2000
@@ -138,7 +138,7 @@ def parse_args() -> TrainingConfig:
     parser.add_argument('--truncate', choices=['head', 'tail', 'middle'], default='tail')
     
     # Training
-    parser.add_argument('--epochs', type=int, default=30)
+    parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--batch-tokens', type=int, default=16384, help='Token budget per step')
     parser.add_argument('--lr', type=float, default=5e-5)
     parser.add_argument('--warmup', type=int, default=2000, help='Warmup steps')
