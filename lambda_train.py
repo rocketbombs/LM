@@ -153,9 +153,11 @@ def parse_args() -> TrainingConfig:
     
     # Hardware
     parser.add_argument('--amp', choices=['bf16', 'fp16', 'off'], default='bf16')
-    parser.add_argument('--grad-checkpoint', action='store_true')
-    parser.add_argument('--compile', action='store_true')
-    parser.add_argument('--flash', action='store_true', default=True)
+    parser.add_argument('--no-grad-checkpoint', dest='grad_checkpoint', action='store_false', default=True,
+                        help='Disable gradient checkpointing (enabled by default to save memory)')
+    parser.add_argument('--compile', action='store_true', help='Enable torch.compile')
+    parser.add_argument('--no-flash', dest='flash', action='store_false', default=True,
+                        help='Disable flash attention (enabled by default)')
     
     # Logging
     parser.add_argument('--seed', type=int, default=42)
