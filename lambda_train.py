@@ -590,8 +590,8 @@ class MultiHeadAttention(nn.Module):
         additive_mask = None
         if mask is not None:
             key_mask = ~mask  # True where padding
-            # Create additive mask: large negative value for padded positions
-            additive_mask = key_mask[:, None, None, :].to(q.dtype) * (-1e4)
+            # Create additive mask: -1e9 for BF16 stability (was -1e4, too small)
+            additive_mask = key_mask[:, None, None, :].to(q.dtype) * (-1e9)
         
         # Attention with Flash if available
         if self.use_flash and hasattr(F, 'scaled_dot_product_attention'):
@@ -827,8 +827,12 @@ def compute_span_loss(start_logits: torch.Tensor, end_logits: torch.Tensor,
     )
     
     # Apply weighting to mask NF examples
-    start_loss = (start_loss_per_sample * loss_weight).sum() / (loss_weight.sum() + 1e-8)
-    end_loss = (end_loss_per_sample * loss_weight).sum() / (loss_weight.sum() + 1e-8)
+    # Use max(sum, 1.0) to avoid division by tiny numbers that cause huge losses
+    num_reducible = loss_weight.sum()
+    if num_reducible < 0.5:  # No reducible examples in batch
+        return torch.tensor(0.0, device=start_logits.device), torch.tensor(0.0, device=start_logits.device)
+    start_loss = (start_loss_per_sample * loss_weight).sum() / num_reducible
+    end_loss = (end_loss_per_sample * loss_weight).sum() / num_reducible
     
     return start_loss, end_loss
 
@@ -855,19 +859,25 @@ def compute_soft_iou_loss(start_logits: torch.Tensor, end_logits: torch.Tensor,
                 if 0 <= idx < L:
                     weight = 1.0 - abs(offset) / (window + 1)
                     soft[i, idx] = weight
-            # Normalize
-            soft[i] = soft[i] / (soft[i].sum() + 1e-8)
+            # Normalize (ensure we have valid weights to normalize)
+            total = soft[i].sum()
+            if total > 1e-6:
+                soft[i] = soft[i] / total
+            else:
+                # Fallback: uniform distribution if no valid weights
+                soft[i, center] = 1.0
         return soft
     
     start_soft = make_soft_target(start_labels)
     end_soft = make_soft_target(end_labels)
     
     # KL divergence between predicted distribution and soft target
-    start_probs = F.softmax(start_logits, dim=-1)
-    end_probs = F.softmax(end_logits, dim=-1)
-    
-    start_iou_loss = F.kl_div(start_probs.log(), start_soft, reduction='batchmean')
-    end_iou_loss = F.kl_div(end_probs.log(), end_soft, reduction='batchmean')
+    # Use log_softmax for numerical stability instead of softmax().log()
+    start_log_probs = F.log_softmax(start_logits, dim=-1)
+    end_log_probs = F.log_softmax(end_logits, dim=-1)
+
+    start_iou_loss = F.kl_div(start_log_probs, start_soft, reduction='batchmean')
+    end_iou_loss = F.kl_div(end_log_probs, end_soft, reduction='batchmean')
     
     return (start_iou_loss + end_iou_loss) / 2
 
