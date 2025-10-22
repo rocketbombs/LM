@@ -764,9 +764,10 @@ class LambdaSpanPredictor(nn.Module):
         rope_cos, rope_sin = None, None
         if self.rope is not None:
             rope_cos, rope_sin = self.rope(x, L)
-            # Reshape for broadcasting: (L, head_dim) -> (1, 1, L, head_dim)
-            rope_cos = rope_cos.unsqueeze(0).unsqueeze(0)
-            rope_sin = rope_sin.unsqueeze(0).unsqueeze(0)
+            # Reshape for broadcasting with (B, L, n_heads, head_dim//2)
+            # (L, head_dim//2) -> (1, L, 1, head_dim//2)
+            rope_cos = rope_cos.unsqueeze(0).unsqueeze(2)
+            rope_sin = rope_sin.unsqueeze(0).unsqueeze(2)
         
         # Apply transformer blocks
         for block in self.blocks:
