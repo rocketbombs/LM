@@ -40,6 +40,7 @@ import time
 import warnings
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any, Iterator
 from queue import Queue
@@ -1042,7 +1043,12 @@ class Trainer:
         # Logging
         self.writer = None
         if config.tb:
-            self.writer = SummaryWriter(config.out)
+            # Create unique timestamped directory for this run
+            timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+            tb_log_dir = Path(config.out) / 'tensorboard' / timestamp
+            tb_log_dir.mkdir(parents=True, exist_ok=True)
+            self.writer = SummaryWriter(tb_log_dir)
+            print(f"TensorBoard logging to: {tb_log_dir}")
 
         # Metrics tracking
         self.train_metrics: Dict[str, deque] = defaultdict(lambda: deque(maxlen=100))
