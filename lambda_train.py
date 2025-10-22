@@ -12,8 +12,8 @@
 #Design rationale:
 #  - Encoder-only selected over encoder-decoder: λ-terms are already fully
 #    rendered; no generation needed, only pointer selection over fixed input.
-#  - Default architecture (12 layers × 768 dim) provides ~150M params,
-#    optimal for 16GB VRAM with gradient checkpointing and 8-bit Adam.
+#  - Default architecture (8 layers × 768 dim) provides ~75M params,
+#    very memory-efficient for 16GB VRAM with gradient checkpointing and 8-bit Adam.
 #  - RoPE positional encoding provides strong contextual representations for
 #    nested parenthetical structure in λ-calculus terms.
 #  - Dual pointer mechanism (start/end) mirrors successful approaches in QA
@@ -26,8 +26,8 @@
 #  - Dynamic batching to token budgets prevents OOM on long sequences
 #  - BF16 mixed precision for numerical stability on reduction chains
 #
-#Default: ~150M params, fits comfortably on 16GB GPUs with batch-tokens=24576.
-#For larger models (700M+), use 24GB+ VRAM with increased d_model/n_layers.
+#Default: ~75M params, fits comfortably on 16GB GPUs with batch-tokens=16384.
+#For larger models, increase d_model/n_layers: 150M (d=768,L=12), 700M (d=1536,L=18).
 #
 
 import argparse
@@ -77,17 +77,17 @@ class TrainingConfig:
     
     # Training
     epochs: int = 3
-    batch_tokens: int = 24576
+    batch_tokens: int = 16384  # Conservative default for 16GB GPU
     lr: float = 3e-4
     warmup: int = 2000
     wd: float = 0.01
     optimizer: str = 'adam8bit'
     grad_clip: float = 1.0
 
-    # Model architecture (right-sized for ~150M params, fits 16GB GPU)
-    # For larger models on 24GB+ GPUs, try: d_model=1536, n_layers=18, n_heads=12, d_ff=6144
+    # Model architecture (right-sized for ~75M params, very memory-efficient)
+    # For larger models: d_model=768 n_layers=12 (150M) or d_model=1536 n_layers=18 (700M)
     d_model: int = 768
-    n_layers: int = 12
+    n_layers: int = 8
     n_heads: int = 8
     d_ff: int = 3072  # 4x for GLU
     dropout: float = 0.0
@@ -138,17 +138,17 @@ def parse_args() -> TrainingConfig:
     
     # Training
     parser.add_argument('--epochs', type=int, default=3)
-    parser.add_argument('--batch-tokens', type=int, default=24576, help='Token budget per step')
+    parser.add_argument('--batch-tokens', type=int, default=16384, help='Token budget per step')
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--warmup', type=int, default=2000, help='Warmup steps')
     parser.add_argument('--wd', type=float, default=0.01, help='Weight decay')
     parser.add_argument('--optimizer', choices=['adamw', 'adam8bit'], default='adam8bit')
     parser.add_argument('--grad-clip', type=float, default=1.0)
-    
+
     # Model
-    parser.add_argument('--d-model', type=int, default=1536)
-    parser.add_argument('--n-layers', type=int, default=18)
-    parser.add_argument('--n-heads', type=int, default=12)
+    parser.add_argument('--d-model', type=int, default=768)
+    parser.add_argument('--n-layers', type=int, default=8)
+    parser.add_argument('--n-heads', type=int, default=8)
     parser.add_argument('--norm-type', choices=['rmsnorm', 'layernorm'], default='rmsnorm')
     
     # Hardware
@@ -492,37 +492,46 @@ class RotaryEmbedding(nn.Module):
 
     def __init__(self, dim: int, max_seq_len: int = 8192):
         super().__init__()
+        # dim is head_dim (d_model // n_heads)
+        # We need dim//2 frequencies for rotating dim//2 pairs
         inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim))
         self.register_buffer('inv_freq', inv_freq)
         self.max_seq_len = max_seq_len
 
         # Pre-compute positional encodings
         t = torch.arange(max_seq_len, dtype=torch.float)
-        freqs = torch.outer(t, inv_freq)
-        emb = torch.cat([freqs, freqs], dim=-1)
-        self.register_buffer('cos_cached', emb.cos())
-        self.register_buffer('sin_cached', emb.sin())
+        freqs = torch.outer(t, inv_freq)  # (max_seq_len, dim//2)
+        # Don't concatenate! Keep shape as (seq_len, dim//2)
+        self.register_buffer('cos_cached', freqs.cos())
+        self.register_buffer('sin_cached', freqs.sin())
 
         # Type hints for buffers (for IDE type checking)
         self.cos_cached: torch.Tensor
         self.sin_cached: torch.Tensor
         self.inv_freq: torch.Tensor
-    
+
     def forward(self, x: torch.Tensor, seq_len: int) -> Tuple[torch.Tensor, torch.Tensor]:
         return self.cos_cached[:seq_len], self.sin_cached[:seq_len]
 
 
 def apply_rotary_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    #Apply rotary embeddings to input tensor.#
+    #Apply rotary embeddings to input tensor.
+    #
+    #Args:
+    #  x: (B, n_heads, L, head_dim) - query or key tensor
+    #  cos: (1, 1, L, head_dim//2) - cosine of rotation angles
+    #  sin: (1, 1, L, head_dim//2) - sine of rotation angles
+    #
+    #Returns:
+    #  Rotated tensor of same shape as x
+    #
     # Split input into even/odd dimensions
-    x1, x2 = x[..., ::2], x[..., 1::2]
-    # Split cos/sin to match the split dimensions
-    cos = cos[..., ::2]
-    sin = sin[..., ::2]
-    # Rotate pairs
+    x1, x2 = x[..., ::2], x[..., 1::2]  # Each has shape (..., head_dim//2)
+    # cos and sin already have shape (..., head_dim//2), no need to split!
+    # Rotate pairs: [x1, x2] -> [x1*cos - x2*sin, x1*sin + x2*cos]
     rx1 = x1 * cos - x2 * sin
     rx2 = x1 * sin + x2 * cos
-    # Interleave back
+    # Interleave back to shape (..., head_dim)
     return torch.stack([rx1, rx2], dim=-1).flatten(-2)
 
 
@@ -665,8 +674,8 @@ class LambdaSpanPredictor(nn.Module):
     #
     #Encoder-only Transformer for λ-calculus redex span prediction.
     #
-    #Default architecture: 12-layer encoder (768 dim, 8 heads) with dual pointer heads
-    #for start/end span prediction. Total params ≈ 150M.
+    #Default architecture: 8-layer encoder (768 dim, 8 heads) with dual pointer heads
+    #for start/end span prediction. Total params ≈ 75M.
     #Configurable via TrainingConfig for larger models on higher-VRAM GPUs.
     #
     #Key design choices:
@@ -755,9 +764,10 @@ class LambdaSpanPredictor(nn.Module):
         rope_cos, rope_sin = None, None
         if self.rope is not None:
             rope_cos, rope_sin = self.rope(x, L)
-            # Reshape for broadcasting: (L, head_dim) -> (1, 1, L, head_dim)
-            rope_cos = rope_cos.unsqueeze(0).unsqueeze(0)
-            rope_sin = rope_sin.unsqueeze(0).unsqueeze(0)
+            # Reshape for broadcasting with (B, L, n_heads, head_dim//2)
+            # (L, head_dim//2) -> (1, L, 1, head_dim//2)
+            rope_cos = rope_cos.unsqueeze(0).unsqueeze(2)
+            rope_sin = rope_sin.unsqueeze(0).unsqueeze(2)
         
         # Apply transformer blocks
         for block in self.blocks:
