@@ -76,13 +76,13 @@ class TrainingConfig:
     truncate: str = 'tail'  # head, tail, middle
     
     # Training
-    epochs: int = 3
+    epochs: int = 30  # Extended for stable long run
     batch_tokens: int = 16384  # Conservative default for 16GB GPU
-    lr: float = 3e-4
+    lr: float = 5e-5  # Reduced for stability (was 3e-4)
     warmup: int = 2000
     wd: float = 0.01
     optimizer: str = 'adam8bit'
-    grad_clip: float = 1.0
+    grad_clip: float = 0.5  # Tightened for stability (was 1.0)
 
     # Model architecture (right-sized for ~75M params, very memory-efficient)
     # For larger models: d_model=768 n_layers=12 (150M) or d_model=1536 n_layers=18 (700M)
@@ -137,13 +137,13 @@ def parse_args() -> TrainingConfig:
     parser.add_argument('--truncate', choices=['head', 'tail', 'middle'], default='tail')
     
     # Training
-    parser.add_argument('--epochs', type=int, default=3)
+    parser.add_argument('--epochs', type=int, default=30)
     parser.add_argument('--batch-tokens', type=int, default=16384, help='Token budget per step')
-    parser.add_argument('--lr', type=float, default=3e-4)
+    parser.add_argument('--lr', type=float, default=5e-5)
     parser.add_argument('--warmup', type=int, default=2000, help='Warmup steps')
     parser.add_argument('--wd', type=float, default=0.01, help='Weight decay')
     parser.add_argument('--optimizer', choices=['adamw', 'adam8bit'], default='adam8bit')
-    parser.add_argument('--grad-clip', type=float, default=1.0)
+    parser.add_argument('--grad-clip', type=float, default=0.5)
 
     # Model
     parser.add_argument('--d-model', type=int, default=768)
