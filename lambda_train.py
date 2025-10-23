@@ -78,17 +78,17 @@ class TrainingConfig:
     
     # Training
     epochs: int = 100  # Extended for stable long run
-    batch_tokens: int = 16384  # Conservative default for 16GB GPU
+    batch_tokens: int = 12288  # Reduced to accommodate larger model (was 16384)
     lr: float = 5e-5  # Reduced for stability (was 3e-4)
     warmup: int = 2000
     wd: float = 0.01
     optimizer: str = 'adam8bit'
     grad_clip: float = 0.5  # Tightened for stability (was 1.0)
 
-    # Model architecture (right-sized for ~75M params, very memory-efficient)
-    # For larger models: d_model=768 n_layers=12 (150M) or d_model=1536 n_layers=18 (700M)
+    # Model architecture (scaled to ~120M params for increased capacity)
+    # Scaling: 8→13 layers provides 60% param increase to address plateau
     d_model: int = 768
-    n_layers: int = 8
+    n_layers: int = 13
     n_heads: int = 8
     d_ff: int = 3072  # 4x for GLU
     dropout: float = 0.0
