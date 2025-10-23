@@ -781,11 +781,14 @@ class LambdaSpanPredictor(nn.Module):
         # Pointer logits: (B, L)
         start_logits = self.start_head(x).squeeze(-1)
         end_logits = self.end_head(x).squeeze(-1)
-        
+
         # Mask out padding positions
+        # Use large negative value instead of -inf to avoid NaN with label smoothing
+        # -inf causes issues: log_softmax(-inf) = -inf, and label smoothing
+        # tries to compute mean over -inf values → NaN
         if attention_mask is not None:
-            start_logits = start_logits.masked_fill(~attention_mask, float('-inf'))
-            end_logits = end_logits.masked_fill(~attention_mask, float('-inf'))
+            start_logits = start_logits.masked_fill(~attention_mask, -1e9)
+            end_logits = end_logits.masked_fill(~attention_mask, -1e9)
         
         # Normal form logit from pooled representation
         # Add eps to avoid division by zero when all positions are masked
