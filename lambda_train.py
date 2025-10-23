@@ -78,17 +78,17 @@ class TrainingConfig:
     
     # Training
     epochs: int = 100  # Extended for stable long run
-    batch_tokens: int = 16384  # Conservative default for 16GB GPU
+    batch_tokens: int = 12288  # Reduced to accommodate larger model (was 16384)
     lr: float = 5e-5  # Reduced for stability (was 3e-4)
     warmup: int = 2000
     wd: float = 0.01
     optimizer: str = 'adam8bit'
     grad_clip: float = 0.5  # Tightened for stability (was 1.0)
 
-    # Model architecture (right-sized for ~75M params, very memory-efficient)
-    # For larger models: d_model=768 n_layers=12 (150M) or d_model=1536 n_layers=18 (700M)
+    # Model architecture (scaled to ~120M params for increased capacity)
+    # Scaling: 8→13 layers provides 60% param increase to address plateau
     d_model: int = 768
-    n_layers: int = 8
+    n_layers: int = 13
     n_heads: int = 8
     d_ff: int = 3072  # 4x for GLU
     dropout: float = 0.0
@@ -139,7 +139,7 @@ def parse_args() -> TrainingConfig:
     
     # Training
     parser.add_argument('--epochs', type=int, default=100)
-    parser.add_argument('--batch-tokens', type=int, default=16384, help='Token budget per step')
+    parser.add_argument('--batch-tokens', type=int, default=12288, help='Token budget per step')
     parser.add_argument('--lr', type=float, default=5e-5)
     parser.add_argument('--warmup', type=int, default=2000, help='Warmup steps')
     parser.add_argument('--wd', type=float, default=0.01, help='Weight decay')
@@ -148,7 +148,7 @@ def parse_args() -> TrainingConfig:
 
     # Model
     parser.add_argument('--d-model', type=int, default=768)
-    parser.add_argument('--n-layers', type=int, default=8)
+    parser.add_argument('--n-layers', type=int, default=13)
     parser.add_argument('--n-heads', type=int, default=8)
     parser.add_argument('--norm-type', choices=['rmsnorm', 'layernorm'], default='rmsnorm')
     
@@ -677,8 +677,8 @@ class LambdaSpanPredictor(nn.Module):
     #
     #Encoder-only Transformer for λ-calculus redex span prediction.
     #
-    #Default architecture: 8-layer encoder (768 dim, 8 heads) with dual pointer heads
-    #for start/end span prediction. Total params ≈ 75M.
+    #Default architecture: 13-layer encoder (768 dim, 8 heads) with dual pointer heads
+    #for start/end span prediction. Total params ≈ 120M.
     #Configurable via TrainingConfig for larger models on higher-VRAM GPUs.
     #
     #Key design choices:
@@ -783,12 +783,14 @@ class LambdaSpanPredictor(nn.Module):
         end_logits = self.end_head(x).squeeze(-1)
 
         # Mask out padding positions
-        # Use large negative value instead of -inf to avoid NaN with label smoothing
-        # -inf causes issues: log_softmax(-inf) = -inf, and label smoothing
-        # tries to compute mean over -inf values → NaN
+        # Use -100 instead of -inf to work with label smoothing
+        # Label smoothing sums log_probs over ALL positions. With -inf or very
+        # large negatives like -1e9, the sum becomes huge and causes loss explosion.
+        # -100 is the sweet spot: exp(-100) ≈ 0 (impossible to predict) but
+        # doesn't dominate the label smoothing sum (adds ~0.5 to loss vs millions)
         if attention_mask is not None:
-            start_logits = start_logits.masked_fill(~attention_mask, -1e9)
-            end_logits = end_logits.masked_fill(~attention_mask, -1e9)
+            start_logits = start_logits.masked_fill(~attention_mask, -100)
+            end_logits = end_logits.masked_fill(~attention_mask, -100)
         
         # Normal form logit from pooled representation
         # Add eps to avoid division by zero when all positions are masked
