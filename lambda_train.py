@@ -783,12 +783,14 @@ class LambdaSpanPredictor(nn.Module):
         end_logits = self.end_head(x).squeeze(-1)
 
         # Mask out padding positions
-        # Use large negative value instead of -inf to avoid NaN with label smoothing
-        # -inf causes issues: log_softmax(-inf) = -inf, and label smoothing
-        # tries to compute mean over -inf values → NaN
+        # Use -100 instead of -inf to work with label smoothing
+        # Label smoothing sums log_probs over ALL positions. With -inf or very
+        # large negatives like -1e9, the sum becomes huge and causes loss explosion.
+        # -100 is the sweet spot: exp(-100) ≈ 0 (impossible to predict) but
+        # doesn't dominate the label smoothing sum (adds ~0.5 to loss vs millions)
         if attention_mask is not None:
-            start_logits = start_logits.masked_fill(~attention_mask, -1e9)
-            end_logits = end_logits.masked_fill(~attention_mask, -1e9)
+            start_logits = start_logits.masked_fill(~attention_mask, -100)
+            end_logits = end_logits.masked_fill(~attention_mask, -100)
         
         # Normal form logit from pooled representation
         # Add eps to avoid division by zero when all positions are masked
