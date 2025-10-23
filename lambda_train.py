@@ -781,11 +781,14 @@ class LambdaSpanPredictor(nn.Module):
         # Pointer logits: (B, L)
         start_logits = self.start_head(x).squeeze(-1)
         end_logits = self.end_head(x).squeeze(-1)
-        
+
         # Mask out padding positions
+        # Use large negative value instead of -inf to avoid NaN with label smoothing
+        # -inf causes issues: log_softmax(-inf) = -inf, and label smoothing
+        # tries to compute mean over -inf values → NaN
         if attention_mask is not None:
-            start_logits = start_logits.masked_fill(~attention_mask, float('-inf'))
-            end_logits = end_logits.masked_fill(~attention_mask, float('-inf'))
+            start_logits = start_logits.masked_fill(~attention_mask, -1e9)
+            end_logits = end_logits.masked_fill(~attention_mask, -1e9)
         
         # Normal form logit from pooled representation
         # Add eps to avoid division by zero when all positions are masked
@@ -833,10 +836,12 @@ def compute_span_loss(start_logits: torch.Tensor, end_logits: torch.Tensor,
     # Use max(sum, 1.0) to avoid division by tiny numbers that cause huge losses
     num_reducible = loss_weight.sum()
     if num_reducible < 0.5:  # No reducible examples in batch
-        return torch.tensor(0.0, device=start_logits.device), torch.tensor(0.0, device=start_logits.device)
+        # Return zero loss that maintains gradient graph
+        # Using .mean() * 0 keeps the tensor in the computation graph
+        return (start_loss_per_sample * 0.0).mean(), (end_loss_per_sample * 0.0).mean()
     start_loss = (start_loss_per_sample * loss_weight).sum() / num_reducible
     end_loss = (end_loss_per_sample * loss_weight).sum() / num_reducible
-    
+
     return start_loss, end_loss
 
 
@@ -890,10 +895,6 @@ def compute_soft_iou_loss(start_logits: torch.Tensor, end_logits: torch.Tensor,
     start_iou_loss = F.kl_div(start_log_probs, start_soft, reduction='batchmean')
     end_iou_loss = F.kl_div(end_log_probs, end_soft, reduction='batchmean')
 
-    # Clamp to avoid NaN propagation
-    start_iou_loss = torch.clamp(start_iou_loss, min=0.0, max=100.0)
-    end_iou_loss = torch.clamp(end_iou_loss, min=0.0, max=100.0)
-
     return (start_iou_loss + end_iou_loss) / 2
 
 
@@ -935,22 +936,13 @@ def compute_total_loss(outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.
         config.nf_weight * nf_loss
     )
 
-    # Check for NaN/Inf and replace with safe values
-    def safe_item(tensor: torch.Tensor, name: str = '') -> float:
-        """Convert tensor to float, replacing NaN/Inf with 0.0"""
-        val = tensor.item()
-        if not torch.isfinite(tensor):
-            # Log warning but don't spam
-            return 0.0
-        return val
-
     return total_loss, {
-        'loss': safe_item(total_loss, 'total_loss'),
-        'start_ce': safe_item(start_ce, 'start_ce'),
-        'end_ce': safe_item(end_ce, 'end_ce'),
-        'span_ce': safe_item(span_ce, 'span_ce'),
-        'iou_loss': safe_item(iou_loss, 'iou_loss'),
-        'nf_loss': safe_item(nf_loss, 'nf_loss'),
+        'loss': total_loss.item(),
+        'start_ce': start_ce.item(),
+        'end_ce': end_ce.item(),
+        'span_ce': span_ce.item(),
+        'iou_loss': iou_loss.item(),
+        'nf_loss': nf_loss.item(),
     }
 
 
@@ -963,12 +955,6 @@ def compute_span_metrics(outputs: Dict[str, torch.Tensor],
     #
     #Compute span prediction metrics: exact match, token F1, span IoU.
     #
-    # Helper to safely convert tensor to float
-    def safe_metric_item(tensor: torch.Tensor, default: float = 0.0) -> float:
-        if torch.isfinite(tensor).all():
-            return tensor.item()
-        return default
-
     start_preds = outputs['start_logits'].argmax(dim=-1)
     end_preds = outputs['end_logits'].argmax(dim=-1)
 
@@ -998,17 +984,11 @@ def compute_span_metrics(outputs: Dict[str, torch.Tensor],
 
     ious = []
     for i in range(len(start_preds)):
-        try:
-            iou = span_iou(
-                start_preds[i].item(), end_preds[i].item(),
-                start_labels[i].item(), end_labels[i].item()
-            )
-            # Only append finite values
-            if not (iou != iou):  # Check for NaN (NaN != NaN is True)
-                ious.append(iou)
-        except Exception:
-            # Skip this sample if computation fails
-            continue
+        iou = span_iou(
+            start_preds[i].item(), end_preds[i].item(),
+            start_labels[i].item(), end_labels[i].item()
+        )
+        ious.append(iou)
 
     mean_iou = sum(ious) / len(ious) if ious else 0.0
 
@@ -1017,10 +997,10 @@ def compute_span_metrics(outputs: Dict[str, torch.Tensor],
     nf_acc = (nf_preds == batch['is_nf']).float().mean()
 
     return {
-        'exact_match': safe_metric_item(exact_match),
-        'token_f1': safe_metric_item(token_f1),
+        'exact_match': exact_match.item(),
+        'token_f1': token_f1.item(),
         'span_iou': mean_iou,
-        'nf_accuracy': safe_metric_item(nf_acc),
+        'nf_accuracy': nf_acc.item(),
     }
 
 
