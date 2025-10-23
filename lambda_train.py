@@ -139,7 +139,7 @@ def parse_args() -> TrainingConfig:
     
     # Training
     parser.add_argument('--epochs', type=int, default=100)
-    parser.add_argument('--batch-tokens', type=int, default=16384, help='Token budget per step')
+    parser.add_argument('--batch-tokens', type=int, default=12288, help='Token budget per step')
     parser.add_argument('--lr', type=float, default=5e-5)
     parser.add_argument('--warmup', type=int, default=2000, help='Warmup steps')
     parser.add_argument('--wd', type=float, default=0.01, help='Weight decay')
@@ -148,7 +148,7 @@ def parse_args() -> TrainingConfig:
 
     # Model
     parser.add_argument('--d-model', type=int, default=768)
-    parser.add_argument('--n-layers', type=int, default=8)
+    parser.add_argument('--n-layers', type=int, default=13)
     parser.add_argument('--n-heads', type=int, default=8)
     parser.add_argument('--norm-type', choices=['rmsnorm', 'layernorm'], default='rmsnorm')
     
@@ -677,8 +677,8 @@ class LambdaSpanPredictor(nn.Module):
     #
     #Encoder-only Transformer for λ-calculus redex span prediction.
     #
-    #Default architecture: 8-layer encoder (768 dim, 8 heads) with dual pointer heads
-    #for start/end span prediction. Total params ≈ 75M.
+    #Default architecture: 13-layer encoder (768 dim, 8 heads) with dual pointer heads
+    #for start/end span prediction. Total params ≈ 120M.
     #Configurable via TrainingConfig for larger models on higher-VRAM GPUs.
     #
     #Key design choices:
