@@ -1,38 +1,26 @@
 #!/usr/bin/env python3
-"""
-Lambda Calculus Reduction Inference Engine
-
-Loads a trained model checkpoint and investigates its reduction strategy
-compared to the gold standard Levy graph reduction. Analyzes divergence
-points, efficiency metrics, and emergent optimization behavior.
-
-IMPORTANT NOTE:
-The current implementation attempts model-guided reduction but has limitations
-in mapping character-level spans to exact redexes. The model was trained on
-character-level tokenization, so predictions are character offsets, not
-structural paths. For best results, use this tool primarily for:
-  1. Analyzing prediction accuracy on gold labels
-  2. Identifying divergence patterns
-  3. Comparing efficiency metrics between strategies
-
-Future improvements could add precise character-to-redex mapping using the
-span annotations from the training data format.
-
-Usage:
-    # Basic investigation with 100 terms
-    python lambda_infer.py --checkpoint runs/levy700m/checkpoints/step_10000.pt --num-terms 100
-
-    # Detailed output with verbose mode
-    python lambda_infer.py --checkpoint runs/levy700m/checkpoints/step_10000.pt \\
-        --num-terms 50 --verbose
-
-    # Save results to JSON for further analysis
-    python lambda_infer.py --checkpoint runs/levy700m/checkpoints/step_10000.pt \\
-        --num-terms 200 --output-dir results/investigation_10k
-"""
+#
+# Lambda Calculus Reduction Inference Engine
+#
+# Loads a trained model checkpoint and investigates its reduction strategy
+# compared to the gold standard Levy graph reduction. Analyzes divergence
+# points, efficiency metrics, and emergent optimization behavior.
+#
+# Usage:
+#   # Basic investigation with 100 terms
+#   python lambda_infer.py --checkpoint runs/levy700m/checkpoints/step_10000.pt --num-terms 100
+#
+#   # Detailed output with verbose mode
+#   python lambda_infer.py --checkpoint runs/levy700m/checkpoints/step_10000.pt \
+#       --num-terms 50 --verbose
+#
+#   # Save results to JSON for further analysis
+#   python lambda_infer.py --checkpoint runs/levy700m/checkpoints/step_10000.pt \
+#       --num-terms 200 --output-dir results/investigation_10k
 
 import argparse
 import json
+import random
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -45,16 +33,17 @@ import torch.nn.functional as F
 # Import from existing scripts
 from lambda_train import LambdaSpanPredictor, LambdaTokenizer, TrainingConfig
 from lambda_gen import (TermGenerator, GraphReducer, TreeReducer, Term, TermType,
-                         reference_substitute, Renderer)
+                         reference_substitute, Renderer, RenderResult)
 
 
 @dataclass
 class InferenceConfig:
-    """Configuration for inference engine."""
+    # Configuration for inference engine.
     checkpoint: str
     num_terms: int = 100
     max_len: int = 2048
-    min_size: int = 10
+    min_depth: int = 2
+    max_depth: int = 10
     max_size: int = 100
     max_steps: int = 1000
     device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -65,7 +54,7 @@ class InferenceConfig:
 
 @dataclass
 class ReductionTrace:
-    """Trace of a reduction sequence."""
+    # Trace of a reduction sequence.
     strategy: str  # 'model' or 'gold'
     steps: List[Tuple[str, Optional[Tuple[int, int]]]]  # (term_str, redex_span)
     converged: bool
@@ -77,7 +66,7 @@ class ReductionTrace:
 
 @dataclass
 class ComparisonMetrics:
-    """Metrics comparing model vs gold reduction."""
+    # Metrics comparing model vs gold reduction.
     term: str
     model_trace: ReductionTrace
     gold_trace: ReductionTrace
@@ -90,16 +79,18 @@ class ComparisonMetrics:
     # Divergence analysis
     diverged: bool
     divergence_step: Optional[int]
-    divergence_context: Optional[str] = None
 
     # Correctness
     same_normal_form: bool
+
+    # Optional fields with defaults
+    divergence_context: Optional[str] = None
     model_nf: str = ""
     gold_nf: str = ""
 
 
 class InferenceEngine:
-    """Engine for running inference and comparing reduction strategies."""
+    # Engine for running inference and comparing reduction strategies.
 
     def __init__(self, config: InferenceConfig):
         self.config = config
@@ -114,16 +105,22 @@ class InferenceEngine:
         checkpoint = torch.load(config.checkpoint, map_location=self.device)
 
         # Extract training config
-        self.train_config = checkpoint.get('config', None)
-        if self.train_config is None:
+        train_config_raw = checkpoint.get('config', None)
+        if train_config_raw is None:
             # Try to load from config.json in same directory
-            config_path = Path(config.checkpoint).parent.parent / 'config.json'
+            config_path = Path(config.checkpoint).parent / 'config.json'
             if config_path.exists():
                 with open(config_path) as f:
                     config_dict = json.load(f)
                     self.train_config = TrainingConfig(**config_dict)
             else:
                 raise ValueError("Could not find training config in checkpoint or config.json")
+        elif isinstance(train_config_raw, dict):
+            # Config is stored as dict, convert to TrainingConfig
+            self.train_config = TrainingConfig(**train_config_raw)
+        else:
+            # Already a TrainingConfig object
+            self.train_config = train_config_raw
 
         print(f"Model: {self.train_config.d_model}d × {self.train_config.n_layers}L")
 
@@ -140,9 +137,14 @@ class InferenceEngine:
         print(f"Loaded from step: {checkpoint.get('step', 'unknown')}")
 
         # Initialize generators and reducers
+        rng = random.Random(config.seed)
         self.term_gen = TermGenerator(
-            min_size=config.min_size,
-            max_size=config.max_size
+            rng=rng,
+            max_depth=config.max_depth,
+            min_depth=config.min_depth,
+            max_size=config.max_size,
+            libraries=[],
+            allow_divergent=False
         )
         self.gold_reducer = GraphReducer(max_steps=config.max_steps)
         self.tree_reducer = TreeReducer(max_steps=config.max_steps)
@@ -150,14 +152,54 @@ class InferenceEngine:
         # Statistics
         self.comparisons: List[ComparisonMetrics] = []
 
-    @torch.no_grad()
-    def predict_redex(self, term_str: str) -> Optional[Tuple[int, int]]:
-        """
-        Predict redex span using the model.
+    def span_to_path(self, render_result: RenderResult,
+                     char_start: int, char_end: int) -> Optional[List[int]]:
+        # Convert character span to structural path using render spans.
+        # Find the node whose span best overlaps with the predicted span.
 
-        Returns:
-            (start_char, end_char) tuple or None if model predicts normal form
-        """
+        best_node_id = None
+        best_overlap = 0
+
+        for node_id, (node_start, node_end) in render_result.spans.items():
+            # Calculate overlap
+            overlap_start = max(char_start, node_start)
+            overlap_end = min(char_end, node_end)
+            overlap = max(0, overlap_end - overlap_start)
+
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_node_id = node_id
+
+        if best_node_id is None:
+            return None
+
+        # Convert node_id to path
+        # Root is 1, left child is 2*n+1, right child is 2*n+2
+        # To get path, we work backwards from node_id to root
+        path = []
+        node = best_node_id
+
+        while node > 1:
+            if node % 2 == 1:  # Left child (odd)
+                path.append(0)
+                node = (node - 1) // 2
+            else:  # Right child (even)
+                path.append(1)
+                node = (node - 2) // 2
+
+        # Path was built backwards, reverse it
+        path.reverse()
+        return path
+
+    @torch.no_grad()
+    def predict_redex(self, term: Term) -> Tuple[Optional[List[int]], bool, RenderResult]:
+        # Predict redex path using the model.
+        # Returns (path, is_normal_form, render_result)
+
+        # Render term with span tracking
+        render_result = Renderer.to_debruijn_with_spans(term)
+        term_str = render_result.string
+
         # Tokenize
         token_ids, offsets = self.tokenizer.encode(term_str, add_special=True)
 
@@ -171,19 +213,19 @@ class InferenceEngine:
         # Get predictions
         start_logits = outputs['start_logits'][0]  # (L,)
         end_logits = outputs['end_logits'][0]  # (L,)
-        nf_logit = outputs['nf_logits'][0, 0]  # scalar
+        nf_logit = outputs['nf_logits'][0].item()
 
         # Check if model predicts normal form
-        nf_prob = torch.sigmoid(nf_logit).item()
+        nf_prob = torch.sigmoid(torch.tensor(nf_logit)).item()
         if nf_prob > 0.5:
-            return None
+            return None, True, render_result
 
         # Get start and end positions
         start_probs = F.softmax(start_logits, dim=0)
         end_probs = F.softmax(end_logits, dim=0)
 
-        start_idx = start_probs.argmax().item()
-        end_idx = end_probs.argmax().item()
+        start_idx = int(start_probs.argmax().item())
+        end_idx = int(end_probs.argmax().item())
 
         # Ensure valid span
         if end_idx < start_idx:
@@ -192,22 +234,21 @@ class InferenceEngine:
         # Convert token indices to character offsets
         # Skip BOS token (index 0)
         if start_idx == 0 or start_idx >= len(offsets):
-            return None
+            return None, False, render_result
         if end_idx == 0 or end_idx >= len(offsets):
-            return None
+            return None, False, render_result
 
         start_char = offsets[start_idx][0]
         end_char = offsets[end_idx][1]
 
-        return (start_char, end_char)
+        # Convert character span to structural path
+        path = self.span_to_path(render_result, start_char, end_char)
+
+        return path, False, render_result
 
     def reduce_with_model(self, term: Term) -> ReductionTrace:
-        """
-        Reduce a term using model predictions for redex selection.
+        # Reduce a term using model predictions for redex selection.
 
-        This is exploratory - we extract character spans from the model
-        and attempt to reduce at those positions.
-        """
         steps = []
         current_term = term
         total_tokens = 0
@@ -220,10 +261,19 @@ class InferenceEngine:
             tokens_per_step.append(term_tokens)
 
             # Get model prediction
-            redex_span = self.predict_redex(term_str)
-            steps.append((term_str, redex_span))
+            redex_path, is_nf, render_result = self.predict_redex(current_term)
 
-            if redex_span is None:
+            # Store step with character span (if available)
+            char_span = None
+            if redex_path and len(redex_path) > 0:
+                # Find the span corresponding to this path
+                node_id = self._path_to_node_id(redex_path)
+                if node_id in render_result.spans:
+                    char_span = render_result.spans[node_id]
+
+            steps.append((term_str, char_span))
+
+            if is_nf or redex_path is None:
                 # Model predicts normal form
                 return ReductionTrace(
                     strategy='model',
@@ -234,16 +284,9 @@ class InferenceEngine:
                     tokens_per_step=tokens_per_step
                 )
 
-            # Try to reduce at predicted span
-            # For simplicity, we'll use a heuristic: find the redex that overlaps
-            # most with the predicted span and reduce it
-            # (A more sophisticated approach would parse the span exactly)
-
-            # Find all redexes in current term
-            all_redexes = self._find_all_redexes(current_term)
-
-            if not all_redexes:
-                # No redexes found but model predicted one - treat as converged
+            # Verify the path points to a valid redex
+            if not self._is_valid_redex_path(current_term, redex_path):
+                # Invalid prediction - treat as converged
                 return ReductionTrace(
                     strategy='model',
                     steps=steps,
@@ -253,12 +296,9 @@ class InferenceEngine:
                     tokens_per_step=tokens_per_step
                 )
 
-            # Select redex that best matches predicted span
-            best_redex = self._select_redex_by_span(all_redexes, redex_span, term_str)
-
-            # Reduce at selected redex
+            # Reduce at predicted path
             try:
-                current_term = self._reduce_at_redex(current_term, best_redex)
+                current_term = self.tree_reducer._apply_reduction(current_term, redex_path)
             except Exception as e:
                 if self.config.verbose:
                     print(f"Reduction failed at step {step_num}: {e}")
@@ -281,8 +321,53 @@ class InferenceEngine:
             tokens_per_step=tokens_per_step
         )
 
+    def _path_to_node_id(self, path: List[int]) -> int:
+        # Convert path to node_id for span lookup
+        node_id = 1
+        for direction in path:
+            if direction == 0:
+                node_id = node_id * 2 + 1
+            else:
+                node_id = node_id * 2 + 2
+        return node_id
+
+    def _is_valid_redex_path(self, term: Term, path: List[int]) -> bool:
+        # Check if path points to a valid redex (APP of ABS)
+        try:
+            current = term
+            for direction in path:
+                if direction == 0:
+                    if current.type == TermType.ABS:
+                        if current.body is None:
+                            return False
+                        current = current.body
+                    elif current.type == TermType.APP:
+                        if current.left is None:
+                            return False
+                        current = current.left
+                    else:
+                        return False
+                else:  # direction == 1
+                    if current.type == TermType.APP:
+                        if current.right is None:
+                            return False
+                        current = current.right
+                    else:
+                        return False
+
+            # Check if we landed on a redex
+            if current.type != TermType.APP:
+                return False
+            if current.left is None:
+                return False
+            if current.left.type != TermType.ABS:
+                return False
+            return True
+        except:
+            return False
+
     def reduce_with_gold(self, term: Term) -> ReductionTrace:
-        """Reduce using Levy graph reduction (gold standard)."""
+        # Reduce using Levy graph reduction (gold standard).
         trace, exceeded_max, _, _ = self.gold_reducer.reduce(term)
 
         steps = []
@@ -298,9 +383,10 @@ class InferenceEngine:
             # Convert path to character span if available
             redex_span = None
             if redex_path:
-                # We'd need to convert path to character offsets
-                # For now, just mark that a redex exists
-                redex_span = (-1, -1)  # Placeholder
+                render_result = Renderer.to_debruijn_with_spans(term_obj)
+                node_id = self._path_to_node_id(redex_path)
+                if node_id in render_result.spans:
+                    redex_span = render_result.spans[node_id]
 
             steps.append((term_str, redex_span))
 
@@ -313,44 +399,8 @@ class InferenceEngine:
             tokens_per_step=tokens_per_step
         )
 
-    def _find_all_redexes(self, term: Term) -> List[Tuple[List[int], Term]]:
-        """Find all redexes in term with their paths and subterms."""
-        redexes = []
-
-        def search(t: Term, path: List[int]):
-            if t.type == TermType.APP and t.left and t.left.type == TermType.ABS:
-                redexes.append((path.copy(), t))
-
-            if t.type == TermType.ABS and t.body:
-                search(t.body, path + [0])
-            elif t.type == TermType.APP:
-                if t.left:
-                    search(t.left, path + [0])
-                if t.right:
-                    search(t.right, path + [1])
-
-        search(term, [])
-        return redexes
-
-    def _select_redex_by_span(self, redexes: List[Tuple[List[int], Term]],
-                             predicted_span: Tuple[int, int],
-                             term_str: str) -> List[int]:
-        """Select redex that best matches predicted character span."""
-        if not redexes:
-            return []
-
-        # For now, use a simple heuristic: prefer leftmost-outermost (first in list)
-        # A better approach would compute character offsets for each redex
-        # and select the one with maximum overlap with predicted_span
-        return redexes[0][0]
-
-    def _reduce_at_redex(self, term: Term, path: List[int]) -> Term:
-        """Apply beta reduction at specified path."""
-        # Use TreeReducer's method
-        return self.tree_reducer._apply_reduction(term, path)
-
     def compare_strategies(self, term: Term) -> ComparisonMetrics:
-        """Run both strategies and compare results."""
+        # Run both strategies and compare results.
         term_str = str(term)
 
         if self.config.verbose:
@@ -399,7 +449,7 @@ class InferenceEngine:
         return metrics
 
     def _print_comparison(self, metrics: ComparisonMetrics):
-        """Print detailed comparison."""
+        # Print detailed comparison.
         print(f"\n  Model: {metrics.model_trace.total_steps} steps, "
               f"{metrics.model_trace.total_tokens} tokens")
         print(f"  Gold:  {metrics.gold_trace.total_steps} steps, "
@@ -410,28 +460,37 @@ class InferenceEngine:
         print(f"  Same NF: {metrics.same_normal_form}")
 
     def run_investigation(self):
-        """Run full investigation on generated terms."""
+        # Run full investigation on generated terms.
         print(f"\n{'='*70}")
         print(f"Lambda Calculus Reduction Strategy Investigation")
         print(f"{'='*70}\n")
         print(f"Generating {self.config.num_terms} terms...")
-        print(f"Size range: [{self.config.min_size}, {self.config.max_size}]")
+        print(f"Depth range: [{self.config.min_depth}, {self.config.max_depth}]")
+        print(f"Max size: {self.config.max_size}")
         print(f"Max steps: {self.config.max_steps}\n")
 
         # Generate terms
         terms = []
-        for i in range(self.config.num_terms):
+        attempts = 0
+        max_attempts = self.config.num_terms * 10
+
+        while len(terms) < self.config.num_terms and attempts < max_attempts:
             term = self.term_gen.generate()
-            terms.append(term)
-            if (i + 1) % 20 == 0:
-                print(f"  Generated {i + 1}/{self.config.num_terms} terms...")
+            if term:
+                terms.append(term)
+                if (len(terms)) % 20 == 0:
+                    print(f"  Generated {len(terms)}/{self.config.num_terms} terms...")
+            attempts += 1
+
+        if len(terms) < self.config.num_terms:
+            print(f"Warning: Only generated {len(terms)} terms after {attempts} attempts")
 
         print(f"\nRunning dual reduction (model vs gold)...\n")
 
         # Run comparisons
         for i, term in enumerate(terms):
             if not self.config.verbose and (i + 1) % 10 == 0:
-                print(f"  Processed {i + 1}/{self.config.num_terms} terms...")
+                print(f"  Processed {i + 1}/{len(terms)} terms...")
 
             try:
                 metrics = self.compare_strategies(term)
@@ -449,7 +508,7 @@ class InferenceEngine:
             self.save_results()
 
     def print_summary(self):
-        """Print summary statistics."""
+        # Print summary statistics.
         if not self.comparisons:
             print("No comparisons completed.")
             return
@@ -544,7 +603,10 @@ class InferenceEngine:
         print(f"\n{'='*70}\n")
 
     def save_results(self):
-        """Save detailed results to JSON."""
+        # Save detailed results to JSON.
+        if self.config.output_dir is None:
+            return
+
         output_dir = Path(self.config.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -595,8 +657,10 @@ def main():
                        help='Path to model checkpoint')
     parser.add_argument('--num-terms', type=int, default=100,
                        help='Number of terms to test')
-    parser.add_argument('--min-size', type=int, default=10,
-                       help='Minimum term size')
+    parser.add_argument('--min-depth', type=int, default=2,
+                       help='Minimum term depth')
+    parser.add_argument('--max-depth', type=int, default=10,
+                       help='Maximum term depth')
     parser.add_argument('--max-size', type=int, default=100,
                        help='Maximum term size')
     parser.add_argument('--max-steps', type=int, default=1000,
