@@ -274,31 +274,42 @@ class InferenceEngine:
 
             steps.append((term_str, char_span))
 
-            # Trust model's NF prediction
+            # Check if model predicts NF but redexes remain
             if is_nf or redex_path is None:
-                # Model predicts normal form
-                return ReductionTrace(
-                    strategy='model',
-                    steps=steps,
-                    converged=True,
-                    total_steps=step_num + 1,
-                    total_tokens=total_tokens,
-                    tokens_per_step=tokens_per_step,
-                    final_term=current_term
-                )
+                # Verify if term is actually in normal form
+                if not self._has_redex(current_term):
+                    # True normal form - stop
+                    return ReductionTrace(
+                        strategy='model',
+                        steps=steps,
+                        converged=True,
+                        total_steps=step_num + 1,
+                        total_tokens=total_tokens,
+                        tokens_per_step=tokens_per_step,
+                        final_term=current_term
+                    )
+                else:
+                    # Model predicted NF but redex exists - nudge it to continue
+                    # Skip this iteration and let model predict again
+                    continue
 
             # Verify the path points to a valid redex
             if not self._is_valid_redex_path(current_term, redex_path):
-                # Invalid prediction - stop here
-                return ReductionTrace(
-                    strategy='model',
-                    steps=steps,
-                    converged=True,
-                    total_steps=step_num + 1,
-                    total_tokens=total_tokens,
-                    tokens_per_step=tokens_per_step,
-                    final_term=current_term
-                )
+                # Invalid prediction - check if there are any redexes
+                if not self._has_redex(current_term):
+                    # No redexes, actually in NF
+                    return ReductionTrace(
+                        strategy='model',
+                        steps=steps,
+                        converged=True,
+                        total_steps=step_num + 1,
+                        total_tokens=total_tokens,
+                        tokens_per_step=tokens_per_step,
+                        final_term=current_term
+                    )
+                else:
+                    # Invalid path but redexes exist - nudge to try again
+                    continue
 
             # Reduce at predicted path
             try:
