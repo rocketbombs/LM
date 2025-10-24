@@ -274,54 +274,31 @@ class InferenceEngine:
 
             steps.append((term_str, char_span))
 
-            # Check if model predicts NF but verify with actual redex detection
+            # Trust model's NF prediction
             if is_nf or redex_path is None:
-                # Model predicts NF - verify by checking for actual redexes
-                if not self._has_redex(current_term):
-                    # True normal form - model was correct
-                    return ReductionTrace(
-                        strategy='model',
-                        steps=steps,
-                        converged=True,
-                        total_steps=step_num + 1,
-                        total_tokens=total_tokens,
-                        tokens_per_step=tokens_per_step,
-                        final_term=current_term
-                    )
-                else:
-                    # Model predicted NF but redex exists - find and reduce it
-                    # Use leftmost-outermost as fallback
-                    fallback_path = self.tree_reducer._find_leftmost_outermost(current_term)
-                    if fallback_path is None:
-                        # Really is NF (shouldn't happen given _has_redex check)
-                        return ReductionTrace(
-                            strategy='model',
-                            steps=steps,
-                            converged=True,
-                            total_steps=step_num + 1,
-                            total_tokens=total_tokens,
-                            tokens_per_step=tokens_per_step,
-                            final_term=current_term
-                        )
-                    # Use fallback path to continue reduction
-                    redex_path = fallback_path
+                # Model predicts normal form
+                return ReductionTrace(
+                    strategy='model',
+                    steps=steps,
+                    converged=True,
+                    total_steps=step_num + 1,
+                    total_tokens=total_tokens,
+                    tokens_per_step=tokens_per_step,
+                    final_term=current_term
+                )
 
             # Verify the path points to a valid redex
             if not self._is_valid_redex_path(current_term, redex_path):
-                # Invalid prediction - try fallback
-                fallback_path = self.tree_reducer._find_leftmost_outermost(current_term)
-                if fallback_path is None:
-                    # No valid redex found - must be in NF
-                    return ReductionTrace(
-                        strategy='model',
-                        steps=steps,
-                        converged=True,
-                        total_steps=step_num + 1,
-                        total_tokens=total_tokens,
-                        tokens_per_step=tokens_per_step,
-                        final_term=current_term
-                    )
-                redex_path = fallback_path
+                # Invalid prediction - stop here
+                return ReductionTrace(
+                    strategy='model',
+                    steps=steps,
+                    converged=True,
+                    total_steps=step_num + 1,
+                    total_tokens=total_tokens,
+                    tokens_per_step=tokens_per_step,
+                    final_term=current_term
+                )
 
             # Reduce at predicted path
             try:
