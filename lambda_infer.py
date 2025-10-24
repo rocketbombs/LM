@@ -105,16 +105,22 @@ class InferenceEngine:
         checkpoint = torch.load(config.checkpoint, map_location=self.device)
 
         # Extract training config
-        self.train_config = checkpoint.get('config', None)
-        if self.train_config is None:
+        train_config_raw = checkpoint.get('config', None)
+        if train_config_raw is None:
             # Try to load from config.json in same directory
-            config_path = Path(config.checkpoint).parent.parent / 'config.json'
+            config_path = Path(config.checkpoint).parent / 'config.json'
             if config_path.exists():
                 with open(config_path) as f:
                     config_dict = json.load(f)
                     self.train_config = TrainingConfig(**config_dict)
             else:
                 raise ValueError("Could not find training config in checkpoint or config.json")
+        elif isinstance(train_config_raw, dict):
+            # Config is stored as dict, convert to TrainingConfig
+            self.train_config = TrainingConfig(**train_config_raw)
+        else:
+            # Already a TrainingConfig object
+            self.train_config = train_config_raw
 
         print(f"Model: {self.train_config.d_model}d × {self.train_config.n_layers}L")
 
