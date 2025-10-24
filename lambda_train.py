@@ -150,6 +150,10 @@ def parse_args() -> TrainingConfig:
     parser.add_argument('--d-model', type=int, default=384)
     parser.add_argument('--n-layers', type=int, default=4)
     parser.add_argument('--n-heads', type=int, default=8)
+    parser.add_argument('--d-ff', type=int, default=1536, help='FFN dimension (typically 4x d_model)')
+    parser.add_argument('--dropout', type=float, default=0.0)
+    parser.add_argument('--drop-path', type=float, default=0.1)
+    parser.add_argument('--pos-encoding', choices=['rope', 'learned'], default='rope')
     parser.add_argument('--norm-type', choices=['rmsnorm', 'layernorm'], default='rmsnorm')
     
     # Hardware
