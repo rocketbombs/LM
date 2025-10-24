@@ -79,10 +79,12 @@ class ComparisonMetrics:
     # Divergence analysis
     diverged: bool
     divergence_step: Optional[int]
-    divergence_context: Optional[str] = None
 
     # Correctness
     same_normal_form: bool
+
+    # Optional fields with defaults
+    divergence_context: Optional[str] = None
     model_nf: str = ""
     gold_nf: str = ""
 
@@ -330,21 +332,31 @@ class InferenceEngine:
             for direction in path:
                 if direction == 0:
                     if current.type == TermType.ABS:
+                        if current.body is None:
+                            return False
                         current = current.body
                     elif current.type == TermType.APP:
+                        if current.left is None:
+                            return False
                         current = current.left
                     else:
                         return False
                 else:  # direction == 1
                     if current.type == TermType.APP:
+                        if current.right is None:
+                            return False
                         current = current.right
                     else:
                         return False
 
             # Check if we landed on a redex
-            return (current.type == TermType.APP and
-                    current.left and
-                    current.left.type == TermType.ABS)
+            if current.type != TermType.APP:
+                return False
+            if current.left is None:
+                return False
+            if current.left.type != TermType.ABS:
+                return False
+            return True
         except:
             return False
 
