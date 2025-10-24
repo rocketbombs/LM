@@ -255,7 +255,7 @@ class InferenceEngine:
         tokens_per_step = []
 
         for step_num in range(self.config.max_steps):
-            term_str = str(current_term)
+            term_str = Renderer.to_debruijn_with_spans(current_term).string
             term_tokens = len(term_str)
             total_tokens += term_tokens
             tokens_per_step.append(term_tokens)
@@ -375,7 +375,7 @@ class InferenceEngine:
         tokens_per_step = []
 
         for term_obj, redex_path in trace:
-            term_str = str(term_obj)
+            term_str = Renderer.to_debruijn_with_spans(term_obj).string
             term_tokens = len(term_str)
             total_tokens += term_tokens
             tokens_per_step.append(term_tokens)
@@ -401,7 +401,7 @@ class InferenceEngine:
 
     def compare_strategies(self, term: Term) -> ComparisonMetrics:
         # Run both strategies and compare results.
-        term_str = str(term)
+        term_str = Renderer.to_debruijn_with_spans(term).string
 
         if self.config.verbose:
             print(f"\nTerm: {term_str}")
