@@ -61,6 +61,7 @@ class ReductionTrace:
     total_steps: int
     total_tokens: int
     tokens_per_step: List[int]
+    final_term: Optional[Term] = None  # The final term object
     divergence_step: Optional[int] = None  # When it diverged from gold
 
 
@@ -255,7 +256,7 @@ class InferenceEngine:
         tokens_per_step = []
 
         for step_num in range(self.config.max_steps):
-            term_str = str(current_term)
+            term_str = Renderer.to_debruijn_with_spans(current_term).string
             term_tokens = len(term_str)
             total_tokens += term_tokens
             tokens_per_step.append(term_tokens)
@@ -273,27 +274,30 @@ class InferenceEngine:
 
             steps.append((term_str, char_span))
 
+            # Accept model's NF prediction as-is
             if is_nf or redex_path is None:
-                # Model predicts normal form
+                # Model predicts normal form - trust it
                 return ReductionTrace(
                     strategy='model',
                     steps=steps,
                     converged=True,
                     total_steps=step_num + 1,
                     total_tokens=total_tokens,
-                    tokens_per_step=tokens_per_step
+                    tokens_per_step=tokens_per_step,
+                    final_term=current_term
                 )
 
             # Verify the path points to a valid redex
             if not self._is_valid_redex_path(current_term, redex_path):
-                # Invalid prediction - treat as converged
+                # Invalid prediction - accept as stopped
                 return ReductionTrace(
                     strategy='model',
                     steps=steps,
                     converged=True,
                     total_steps=step_num + 1,
                     total_tokens=total_tokens,
-                    tokens_per_step=tokens_per_step
+                    tokens_per_step=tokens_per_step,
+                    final_term=current_term
                 )
 
             # Reduce at predicted path
@@ -308,7 +312,8 @@ class InferenceEngine:
                     converged=False,
                     total_steps=step_num + 1,
                     total_tokens=total_tokens,
-                    tokens_per_step=tokens_per_step
+                    tokens_per_step=tokens_per_step,
+                    final_term=current_term
                 )
 
         # Exceeded max steps
@@ -318,7 +323,8 @@ class InferenceEngine:
             converged=False,
             total_steps=self.config.max_steps,
             total_tokens=total_tokens,
-            tokens_per_step=tokens_per_step
+            tokens_per_step=tokens_per_step,
+            final_term=current_term
         )
 
     def _path_to_node_id(self, path: List[int]) -> int:
@@ -373,9 +379,10 @@ class InferenceEngine:
         steps = []
         total_tokens = 0
         tokens_per_step = []
+        final_term_obj = None
 
         for term_obj, redex_path in trace:
-            term_str = str(term_obj)
+            term_str = Renderer.to_debruijn_with_spans(term_obj).string
             term_tokens = len(term_str)
             total_tokens += term_tokens
             tokens_per_step.append(term_tokens)
@@ -389,6 +396,7 @@ class InferenceEngine:
                     redex_span = render_result.spans[node_id]
 
             steps.append((term_str, redex_span))
+            final_term_obj = term_obj
 
         return ReductionTrace(
             strategy='gold',
@@ -396,12 +404,45 @@ class InferenceEngine:
             converged=not exceeded_max,
             total_steps=len(trace),
             total_tokens=total_tokens,
-            tokens_per_step=tokens_per_step
+            tokens_per_step=tokens_per_step,
+            final_term=final_term_obj
         )
+
+    def _has_redex(self, term: Term) -> bool:
+        # Check if term contains any redex (is not in normal form)
+        if term.type == TermType.APP and term.left and term.left.type == TermType.ABS:
+            return True
+
+        if term.type == TermType.ABS and term.body:
+            return self._has_redex(term.body)
+        elif term.type == TermType.APP:
+            if term.left and self._has_redex(term.left):
+                return True
+            if term.right and self._has_redex(term.right):
+                return True
+
+        return False
+
+    def _terms_equal(self, t1: Term, t2: Term) -> bool:
+        # Structural equality check for terms
+        if t1.type != t2.type:
+            return False
+
+        if t1.type == TermType.VAR:
+            return t1.var == t2.var
+        elif t1.type == TermType.ABS:
+            if t1.body is None or t2.body is None:
+                return t1.body == t2.body
+            return self._terms_equal(t1.body, t2.body)
+        else:  # APP
+            if t1.left is None or t2.left is None or t1.right is None or t2.right is None:
+                return (t1.left == t2.left and t1.right == t2.right)
+            return (self._terms_equal(t1.left, t2.left) and
+                   self._terms_equal(t1.right, t2.right))
 
     def compare_strategies(self, term: Term) -> ComparisonMetrics:
         # Run both strategies and compare results.
-        term_str = str(term)
+        term_str = Renderer.to_debruijn_with_spans(term).string
 
         if self.config.verbose:
             print(f"\nTerm: {term_str}")
@@ -410,9 +451,23 @@ class InferenceEngine:
         model_trace = self.reduce_with_model(term)
         gold_trace = self.reduce_with_gold(term)
 
-        # Extract normal forms
+        # Extract normal forms (strings and terms)
         model_nf = model_trace.steps[-1][0] if model_trace.steps else term_str
         gold_nf = gold_trace.steps[-1][0] if gold_trace.steps else term_str
+
+        # Check if both are actually in normal form
+        model_is_nf = (model_trace.final_term is None or
+                      not self._has_redex(model_trace.final_term))
+        gold_is_nf = (gold_trace.final_term is None or
+                     not self._has_redex(gold_trace.final_term))
+
+        # Check structural equality if both reached NF
+        structurally_equal = False
+        if (model_trace.final_term is not None and
+            gold_trace.final_term is not None and
+            model_is_nf and gold_is_nf):
+            structurally_equal = self._terms_equal(model_trace.final_term,
+                                                   gold_trace.final_term)
 
         # Check divergence
         diverged = False
@@ -429,6 +484,17 @@ class InferenceEngine:
         step_diff = model_trace.total_steps - gold_trace.total_steps
         token_diff = model_trace.total_tokens - gold_trace.total_tokens
 
+        # Consider "same" if string match OR structural equality
+        same_nf = (model_nf == gold_nf) or structurally_equal
+
+        context = None
+        if not model_is_nf:
+            context = "model_not_nf"
+        elif not gold_is_nf:
+            context = "gold_not_nf"
+        elif not same_nf:
+            context = "different_nf"
+
         metrics = ComparisonMetrics(
             term=term_str,
             model_trace=model_trace,
@@ -438,7 +504,8 @@ class InferenceEngine:
             token_difference=token_diff,
             diverged=diverged,
             divergence_step=divergence_step,
-            same_normal_form=(model_nf == gold_nf),
+            same_normal_form=same_nf,
+            divergence_context=context,
             model_nf=model_nf,
             gold_nf=gold_nf
         )
@@ -531,6 +598,23 @@ class InferenceEngine:
         same_nf = sum(1 for c in self.comparisons if c.same_normal_form)
         print(f"\nCorrectness:")
         print(f"  Same normal form: {same_nf}/{total} ({100*same_nf/total:.1f}%)")
+
+        # Breakdown of mismatches
+        model_not_nf = sum(1 for c in self.comparisons
+                          if c.divergence_context == "model_not_nf")
+        gold_not_nf = sum(1 for c in self.comparisons
+                         if c.divergence_context == "gold_not_nf")
+        different_nf = sum(1 for c in self.comparisons
+                          if c.divergence_context == "different_nf")
+
+        if model_not_nf + gold_not_nf + different_nf > 0:
+            print(f"\nNormal Form Analysis:")
+            print(f"  Model stopped early (still has redex): {model_not_nf}/{total} "
+                  f"({100*model_not_nf/total:.1f}%)")
+            print(f"  Gold not in NF (unexpected): {gold_not_nf}/{total} "
+                  f"({100*gold_not_nf/total:.1f}%)")
+            print(f"  Both in NF but different: {different_nf}/{total} "
+                  f"({100*different_nf/total:.1f}%)")
 
         # Divergence
         diverged = sum(1 for c in self.comparisons if c.diverged)
