@@ -93,16 +93,20 @@ class Term:
         if self.type == TermType.VAR:
             return 1
         elif self.type == TermType.ABS:
+            assert self.body is not None
             return 1 + self.body.size()
         else:
+            assert self.left is not None and self.right is not None
             return 1 + self.left.size() + self.right.size()
-    
+
     def depth(self) -> int:
         if self.type == TermType.VAR:
             return 0
         elif self.type == TermType.ABS:
+            assert self.body is not None
             return 1 + self.body.depth()
         else:
+            assert self.left is not None and self.right is not None
             return 1 + max(self.left.depth(), self.right.depth())
 
 # ============================================================================
@@ -411,17 +415,20 @@ class Renderer:
             start = pos[0]
             
             if t.type == TermType.VAR:
+                assert t.var is not None
                 s = str(t.var)
                 parts.append(s)
                 pos[0] += len(s)
             elif t.type == TermType.ABS:
+                assert t.body is not None
                 parts.append('\\.')
                 pos[0] += 2
                 render(t.body, node_id * 2 + 1)
             else:
+                assert t.left is not None and t.right is not None
                 need_left_paren = t.left.type == TermType.ABS
                 need_right_paren = t.right.type == TermType.ABS
-                
+
                 if need_left_paren:
                     parts.append('(')
                     pos[0] += 1
@@ -429,7 +436,7 @@ class Renderer:
                 if need_left_paren:
                     parts.append(')')
                     pos[0] += 1
-                
+
                 if need_right_paren:
                     parts.append('(')
                     pos[0] += 1
@@ -458,21 +465,24 @@ class Renderer:
         
         def render(t: Term, env: List[str], node_id: int):
             start = pos[0]
-            
+
             if t.type == TermType.VAR:
+                assert t.var is not None
                 s = env[t.var] if t.var < len(env) else f"?{t.var}"
                 parts.append(s)
                 pos[0] += len(s)
             elif t.type == TermType.ABS:
+                assert t.body is not None
                 vname = var_name(len(env))
                 parts.append(f'\\{vname}.')
                 pos[0] += len(vname) + 2
                 new_env = [vname] + env
                 render(t.body, new_env, node_id * 2 + 1)
             else:
+                assert t.left is not None and t.right is not None
                 need_left_paren = t.left.type == TermType.ABS
                 need_right_paren = t.right.type == TermType.ABS
-                
+
                 if need_left_paren:
                     parts.append('(')
                     pos[0] += 1
@@ -480,7 +490,7 @@ class Renderer:
                 if need_left_paren:
                     parts.append(')')
                     pos[0] += 1
-                
+
                 if need_right_paren:
                     parts.append('(')
                     pos[0] += 1
@@ -522,26 +532,32 @@ def reference_substitute(term: Term, var: int, replacement: Term) -> Term:
     #Slow, obviously-correct capture-avoiding substitution.#
     def shift(t: Term, amount: int, cutoff: int = 0) -> Term:
         if t.type == TermType.VAR:
+            assert t.var is not None
             if t.var >= cutoff:
                 return Term(TermType.VAR, var=t.var + amount)
             return t
         elif t.type == TermType.ABS:
+            assert t.body is not None
             return Term(TermType.ABS, body=shift(t.body, amount, cutoff + 1))
         else:
+            assert t.left is not None and t.right is not None
             return Term(TermType.APP, left=shift(t.left, amount, cutoff),
                        right=shift(t.right, amount, cutoff))
-    
+
     def subst(t: Term, v: int, repl: Term, depth: int = 0) -> Term:
         if t.type == TermType.VAR:
+            assert t.var is not None
             if t.var == v + depth:
                 return shift(repl, depth)
             return t
         elif t.type == TermType.ABS:
+            assert t.body is not None
             return Term(TermType.ABS, body=subst(t.body, v, repl, depth + 1))
         else:
+            assert t.left is not None and t.right is not None
             return Term(TermType.APP, left=subst(t.left, v, repl, depth),
                        right=subst(t.right, v, repl, depth))
-    
+
     return subst(term, var, replacement, 0)
 
 def terms_alpha_equiv(t1: Term, t2: Term) -> bool:
@@ -582,30 +598,39 @@ class TreeReducer:
         #Find leftmost-outermost β-redex.#
         if path is None:
             path = []
-        
-        if term.type == TermType.APP and term.left.type == TermType.ABS:
-            return path
-        
+
+        if term.type == TermType.APP:
+            assert term.left is not None and term.right is not None
+            if term.left.type == TermType.ABS:
+                return path
+
         if term.type == TermType.ABS:
+            assert term.body is not None
             return self._find_leftmost_outermost(term.body, path + [0])
         elif term.type == TermType.APP:
+            assert term.left is not None and term.right is not None
             left_result = self._find_leftmost_outermost(term.left, path + [0])
             if left_result:
                 return left_result
             return self._find_leftmost_outermost(term.right, path + [1])
-        
+
         return None
-    
+
     def _apply_reduction(self, term: Term, path: List[int]) -> Term:
         #Apply β-reduction at specified path.#
         if not path:
-            assert term.type == TermType.APP and term.left.type == TermType.ABS
+            assert term.type == TermType.APP
+            assert term.left is not None and term.right is not None
+            assert term.left.type == TermType.ABS
+            assert term.left.body is not None
             return reference_substitute(term.left.body, 0, term.right)
-        
+
         direction = path[0]
         if term.type == TermType.ABS:
+            assert term.body is not None
             return Term(TermType.ABS, body=self._apply_reduction(term.body, path[1:]))
         else:
+            assert term.left is not None and term.right is not None
             if direction == 0:
                 return Term(TermType.APP, left=self._apply_reduction(term.left, path[1:]),
                            right=term.right)
@@ -635,13 +660,15 @@ class GraphReducer:
         #Convert tree term to graph node.#
         if env is None:
             env = []
-        
+
         if term.type == TermType.VAR:
             return GraphNode(NodeKind.VAR, var=term.var, env=env)
         elif term.type == TermType.ABS:
+            assert term.body is not None
             body = self.term_to_graph(term.body, env)
             return GraphNode(NodeKind.ABS, body=body, env=env)
         else:
+            assert term.left is not None and term.right is not None
             left = self.term_to_graph(term.left, env)
             right = self.term_to_graph(term.right, env)
             return GraphNode(NodeKind.APP, left=left, right=right, env=env)
@@ -669,50 +696,62 @@ class GraphReducer:
     def _find_redex(self, term: Term) -> Optional[List[int]]:
         #Find leftmost-outermost redex in projected tree.#
         def search(t: Term, path: List[int]) -> Optional[List[int]]:
-            if t.type == TermType.APP and t.left.type == TermType.ABS:
-                return path
+            if t.type == TermType.APP:
+                assert t.left is not None and t.right is not None
+                if t.left.type == TermType.ABS:
+                    return path
             if t.type == TermType.ABS:
+                assert t.body is not None
                 return search(t.body, path + [0])
             elif t.type == TermType.APP:
+                assert t.left is not None and t.right is not None
                 left_result = search(t.left, path + [0])
                 if left_result:
                     return left_result
                 return search(t.right, path + [1])
             return None
-        
+
         return search(term, [])
     
     def _reduce_at_path(self, graph: GraphNode, path: List[int]) -> GraphNode:
         #Apply β-reduction at path with thunk binding.#
         if not path:
-            assert graph.kind == NodeKind.APP and graph.left.kind == NodeKind.ABS
-            arg_thunk = GraphNode(NodeKind.THUNK, body=graph.right, 
+            assert graph.kind == NodeKind.APP
+            assert graph.left is not None and graph.right is not None
+            assert graph.left.kind == NodeKind.ABS
+            assert graph.left.body is not None
+            arg_thunk = GraphNode(NodeKind.THUNK, body=graph.right,
                                 env=graph.right.env, evaluated=False)
             new_env = [arg_thunk] + (graph.left.env or [])
             return self._instantiate(graph.left.body, new_env)
-        
+
         direction = path[0]
         if graph.kind == NodeKind.ABS:
+            assert graph.body is not None
             new_body = self._reduce_at_path(graph.body, path[1:])
             return GraphNode(NodeKind.ABS, body=new_body, env=graph.env)
         else:
+            assert graph.left is not None and graph.right is not None
             if direction == 0:
                 new_left = self._reduce_at_path(graph.left, path[1:])
                 return GraphNode(NodeKind.APP, left=new_left, right=graph.right, env=graph.env)
             else:
                 new_right = self._reduce_at_path(graph.right, path[1:])
                 return GraphNode(NodeKind.APP, left=graph.left, right=new_right, env=graph.env)
-    
+
     def _instantiate(self, node: GraphNode, env: List[GraphNode]) -> GraphNode:
         #Instantiate node with new environment.#
         if node.kind == NodeKind.VAR:
+            assert node.var is not None
             if node.var < len(env):
                 return self._force(env[node.var])
             return GraphNode(NodeKind.VAR, var=node.var, env=env)
         elif node.kind == NodeKind.ABS:
+            assert node.body is not None
             new_body = self._instantiate(node.body, env)
             return GraphNode(NodeKind.ABS, body=new_body, env=env)
         else:
+            assert node.left is not None and node.right is not None
             new_left = self._instantiate(node.left, env)
             new_right = self._instantiate(node.right, env)
             return GraphNode(NodeKind.APP, left=new_left, right=new_right, env=env)
@@ -789,7 +828,8 @@ class Config:
 
 def generate_example(config: Config, rng: random.Random, draw_index: int) -> Optional[Any]:
     #Generate a single training example.#
-    gen = TermGenerator(rng, config.max_depth, config.min_depth, 
+    assert config.libraries is not None  # __post_init__ ensures this
+    gen = TermGenerator(rng, config.max_depth, config.min_depth,
                        config.max_size, config.libraries, config.allow_divergent)
     
     # Try to generate a term with limited retries
@@ -1139,8 +1179,8 @@ def test_mode(args, config: Config):
                 print(f"Step {step:2d}: {highlighted[:70]}")
     
     if RICH_AVAILABLE and not args.no_ansi:
-        console = Console()
-        table = Table(title=f"Samples (n={len(samples)})", box=box.ROUNDED)
+        console = Console()  # type: ignore
+        table = Table(title=f"Samples (n={len(samples)})", box=box.ROUNDED)  # type: ignore
         table.add_column("Term")
         table.add_column("Steps", justify="right")
         table.add_column("Share", justify="right")
