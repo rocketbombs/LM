@@ -51,6 +51,7 @@
 import argparse
 import hashlib
 import json
+import multiprocessing as mp
 import random
 import sys
 import time
@@ -189,11 +190,36 @@ class TermGenerator:
         self.allow_divergent = allow_divergent
     
     def generate(self) -> Optional[Term]:
-        #Generate a random term with rejection sampling.#
-        for _ in range(100):
-            term = self._gen_term(0, 0)
-            if term and term.depth() >= self.min_depth and term.size() <= self.max_size:
-                return term
+        #Generate a random term with size/depth distribution sampling for better coverage.#
+        # Sample target size and depth from distributions to ensure good coverage
+        # Use log-uniform for sizes to get better representation across the range
+        # Use uniform for depths within valid range
+
+        for attempt in range(100):
+            # 70% of the time: sample size/depth from distribution for diversity
+            # 30% of the time: use full range for exploration
+            if self.rng.random() < 0.7 and attempt < 80:
+                # Log-uniform sampling for size (more small and medium terms)
+                log_min = 1
+                log_max = max(2, int(self.max_size ** 0.5))
+                target_size = min(self.max_size, self.rng.randint(log_min, log_max) ** 2)
+
+                # Uniform sampling for depth
+                target_depth = self.rng.randint(self.min_depth, self.max_depth)
+
+                term = self._gen_term(0, 0)
+                if term and term.depth() >= self.min_depth and term.size() <= self.max_size:
+                    # Accept if close to target (within 40%) or if we've tried many times
+                    size_ok = attempt > 40 or abs(term.size() - target_size) <= max(5, target_size * 0.4)
+                    depth_ok = attempt > 40 or abs(term.depth() - target_depth) <= 3
+                    if size_ok and depth_ok:
+                        return term
+            else:
+                # Full range exploration - just accept any valid term
+                term = self._gen_term(0, 0)
+                if term and term.depth() >= self.min_depth and term.size() <= self.max_size:
+                    return term
+
         return None
     
     def _gen_term(self, depth: int, bound_vars: int) -> Optional[Term]:
@@ -230,20 +256,23 @@ class TermGenerator:
             n = self.rng.randint(0, 5)
             body = Term(TermType.VAR, var=0)
             for _ in range(n):
-                body = Term(TermType.APP, 
+                body = Term(TermType.APP,
                           left=Term(TermType.VAR, var=1),
                           right=body)
             inner = Term(TermType.ABS, body=body)
             return Term(TermType.ABS, body=inner)
-        
+
         elif name == 'ski':
             choice = self.rng.choice(['S', 'K', 'I'])
             if choice == 'I':
+                # I = \x.x
                 return Term(TermType.ABS, body=Term(TermType.VAR, var=0))
             elif choice == 'K':
+                # K = \x.\y.x
                 inner = Term(TermType.ABS, body=Term(TermType.VAR, var=1))
                 return Term(TermType.ABS, body=inner)
             else:
+                # S = \x.\y.\z.xz(yz)
                 z = Term(TermType.VAR, var=0)
                 y = Term(TermType.VAR, var=1)
                 x = Term(TermType.VAR, var=2)
@@ -253,11 +282,44 @@ class TermGenerator:
                 l3 = Term(TermType.ABS, body=body)
                 l2 = Term(TermType.ABS, body=l3)
                 return Term(TermType.ABS, body=l2)
-        
+
+        elif name == 'combinators':
+            # Extended combinator library: B, C, W, etc.
+            choice = self.rng.choice(['B', 'C', 'W'])
+            if choice == 'B':
+                # B = \x.\y.\z.x(yz) (composition)
+                z = Term(TermType.VAR, var=0)
+                y = Term(TermType.VAR, var=1)
+                x = Term(TermType.VAR, var=2)
+                yz = Term(TermType.APP, left=y, right=z)
+                body = Term(TermType.APP, left=x, right=yz)
+                l3 = Term(TermType.ABS, body=body)
+                l2 = Term(TermType.ABS, body=l3)
+                return Term(TermType.ABS, body=l2)
+            elif choice == 'C':
+                # C = \x.\y.\z.xzy (flip)
+                z = Term(TermType.VAR, var=0)
+                y = Term(TermType.VAR, var=1)
+                x = Term(TermType.VAR, var=2)
+                xz = Term(TermType.APP, left=x, right=z)
+                body = Term(TermType.APP, left=xz, right=y)
+                l3 = Term(TermType.ABS, body=body)
+                l2 = Term(TermType.ABS, body=l3)
+                return Term(TermType.ABS, body=l2)
+            else:  # W
+                # W = \x.\y.xyy (duplication)
+                y = Term(TermType.VAR, var=0)
+                x = Term(TermType.VAR, var=1)
+                xy = Term(TermType.APP, left=x, right=y)
+                body = Term(TermType.APP, left=xy, right=y)
+                l2 = Term(TermType.ABS, body=body)
+                return Term(TermType.ABS, body=l2)
+
         elif name == 'y':
             if not self.allow_divergent:
                 return None
-            xx = Term(TermType.APP, 
+            # Y = \f.(\x.f(xx))(\x.f(xx))
+            xx = Term(TermType.APP,
                      left=Term(TermType.VAR, var=0),
                      right=Term(TermType.VAR, var=0))
             fxx = Term(TermType.APP,
@@ -266,16 +328,59 @@ class TermGenerator:
             inner = Term(TermType.ABS, body=fxx)
             app = Term(TermType.APP, left=inner, right=inner)
             return Term(TermType.ABS, body=app)
-        
+
+        elif name == 'omega':
+            if not self.allow_divergent:
+                return None
+            # ω = \x.xx (self-application)
+            xx = Term(TermType.APP,
+                     left=Term(TermType.VAR, var=0),
+                     right=Term(TermType.VAR, var=0))
+            return Term(TermType.ABS, body=xx)
+
         elif name == 'booleans':
             choice = self.rng.choice(['true', 'false'])
             if choice == 'true':
+                # True = \x.\y.x
                 inner = Term(TermType.ABS, body=Term(TermType.VAR, var=1))
                 return Term(TermType.ABS, body=inner)
             else:
+                # False = \x.\y.y
                 inner = Term(TermType.ABS, body=Term(TermType.VAR, var=0))
                 return Term(TermType.ABS, body=inner)
-        
+
+        elif name == 'pairs':
+            # Pair encoding and projection functions
+            choice = self.rng.choice(['pair', 'fst', 'snd'])
+            if choice == 'pair':
+                # pair = \x.\y.\z.zxy
+                z = Term(TermType.VAR, var=0)
+                y = Term(TermType.VAR, var=1)
+                x = Term(TermType.VAR, var=2)
+                zx = Term(TermType.APP, left=z, right=x)
+                body = Term(TermType.APP, left=zx, right=y)
+                l3 = Term(TermType.ABS, body=body)
+                l2 = Term(TermType.ABS, body=l3)
+                return Term(TermType.ABS, body=l2)
+            elif choice == 'fst':
+                # fst = \p.p(\x.\y.x) = \p.p(True)
+                y = Term(TermType.VAR, var=0)
+                x = Term(TermType.VAR, var=1)
+                inner = Term(TermType.ABS, body=x)
+                l2 = Term(TermType.ABS, body=inner)
+                p = Term(TermType.VAR, var=0)
+                body = Term(TermType.APP, left=p, right=l2)
+                return Term(TermType.ABS, body=body)
+            else:  # snd
+                # snd = \p.p(\x.\y.y) = \p.p(False)
+                y = Term(TermType.VAR, var=0)
+                x = Term(TermType.VAR, var=1)
+                inner = Term(TermType.ABS, body=y)
+                l2 = Term(TermType.ABS, body=inner)
+                p = Term(TermType.VAR, var=0)
+                body = Term(TermType.APP, left=p, right=l2)
+                return Term(TermType.ABS, body=body)
+
         return None
 
 # ============================================================================
@@ -459,16 +564,16 @@ class TreeReducer:
         #Reduce term, return trace with redex paths aligned at each step.#
         trace = []
         current = term
-        
+
         for step in range(self.max_steps):
             redex_path = self._find_leftmost_outermost(current)
             trace.append((current, redex_path))
-            
-            if not redex_path:
+
+            if redex_path is None:
                 return trace, False
-            
+
             current = self._apply_reduction(current, redex_path)
-        
+
         final_redex = self._find_leftmost_outermost(current)
         trace.append((current, final_redex))
         return trace, True
@@ -631,16 +736,17 @@ class GraphReducer:
 # SPAN CALCULATION
 # ============================================================================
 
-def get_redex_span(term: Term, redex_path: List[int], render_mode: str) -> Tuple[int, int]:
+def get_redex_span(term: Term, redex_path: Optional[List[int]], render_mode: str) -> Tuple[int, int]:
     #Calculate token span for redex using renderer span map.#
     if render_mode == 'debruijn':
         result = Renderer.to_debruijn_with_spans(term)
     else:
         result = Renderer.to_named_with_spans(term)
-    
-    if not redex_path:
+
+    # None means no redex (normal form), empty list means redex at root
+    if redex_path is None:
         return (0, 0)
-    
+
     node_id = path_to_node_id(redex_path)
     if node_id in result.spans:
         return result.spans[node_id]
@@ -723,65 +829,21 @@ def generate_example(config: Config, rng: random.Random, draw_index: int) -> Opt
     if not trace or len(trace) == 0:
         return None
     
-    if config.emit_trace:
-        examples = []
-        trace_id = str(uuid.uuid4())
-        for step_k in range(len(trace)):
-            current_term, redex_path = trace[step_k]
-            
-            if config.render == 'debruijn':
-                result = Renderer.to_debruijn_with_spans(current_term)
-            else:
-                result = Renderer.to_named_with_spans(current_term)
-            
-            target_span = list(get_redex_span(current_term, redex_path or [], config.render))
-            
-            example = {
-                'strategy': config.strategy,
-                'render': config.render,
-                'term': result.string,
-                'step_k': step_k,
-                'target_span': target_span,
-                'steps_total': len(trace) - 1,
-                'diverged': diverged,
-                'trace_id': trace_id,
-                'meta': {
-                    'size': current_term.size(),
-                    'depth': current_term.depth(),
-                    'libs': config.libraries,
-                    'seed': config.seed,
-                    'draw_index': draw_index,
-                    'uid': trace_id,
-                    'thunk_evals': thunk_evals,
-                    'thunk_hits': thunk_hits,
-                    'schema_version': SCHEMA_VERSION,
-                    'term_hash': term_hash(result.string)
-                }
-            }
-            
-            if config.emit_next and step_k < len(trace) - 1:
-                next_term, _ = trace[step_k + 1]
-                next_result = Renderer.to_debruijn_with_spans(next_term) if config.render == 'debruijn' else Renderer.to_named_with_spans(next_term)
-                example['next_term'] = next_result.string
-            
-            if config.emit_nf and not diverged and step_k == len(trace) - 1:
-                example['normal_form'] = result.string
-            
-            examples.append(example)
-        
-        return examples if examples else None
-    
-    else:
-        step_k = rng.randint(0, max(0, len(trace) - 2))
+    # ALWAYS emit full traces for sequential training
+    # Random sampling (lines 774-817) was causing distribution mismatch
+    # Model needs to see ALL steps to learn proper reduction sequences
+    examples = []
+    trace_id = str(uuid.uuid4())
+    for step_k in range(len(trace)):
         current_term, redex_path = trace[step_k]
-        
+
         if config.render == 'debruijn':
             result = Renderer.to_debruijn_with_spans(current_term)
         else:
             result = Renderer.to_named_with_spans(current_term)
-        
+
         target_span = list(get_redex_span(current_term, redex_path or [], config.render))
-        
+
         example = {
             'strategy': config.strategy,
             'render': config.render,
@@ -790,31 +852,32 @@ def generate_example(config: Config, rng: random.Random, draw_index: int) -> Opt
             'target_span': target_span,
             'steps_total': len(trace) - 1,
             'diverged': diverged,
+            'trace_id': trace_id,
             'meta': {
                 'size': current_term.size(),
                 'depth': current_term.depth(),
                 'libs': config.libraries,
                 'seed': config.seed,
                 'draw_index': draw_index,
-                'uid': str(uuid.uuid4()),
+                'uid': trace_id,
                 'thunk_evals': thunk_evals,
                 'thunk_hits': thunk_hits,
                 'schema_version': SCHEMA_VERSION,
                 'term_hash': term_hash(result.string)
             }
         }
-        
+
         if config.emit_next and step_k < len(trace) - 1:
             next_term, _ = trace[step_k + 1]
             next_result = Renderer.to_debruijn_with_spans(next_term) if config.render == 'debruijn' else Renderer.to_named_with_spans(next_term)
             example['next_term'] = next_result.string
-        
-        if config.emit_nf and not diverged:
-            nf, _ = trace[-1]
-            nf_result = Renderer.to_debruijn_with_spans(nf) if config.render == 'debruijn' else Renderer.to_named_with_spans(nf)
-            example['normal_form'] = nf_result.string
-        
-        return example
+
+        if config.emit_nf and not diverged and step_k == len(trace) - 1:
+            example['normal_form'] = result.string
+
+        examples.append(example)
+
+    return examples if examples else None
 
 def yield_examples(config: Config) -> Iterator[Dict[str, Any]]:
     #Generator yielding training examples.#
@@ -1187,11 +1250,13 @@ def validate_mode(args, config: Config):
     print("\n[4] Span accuracy")
     span_ok = 0
     for _ in range(20):
-        ex = generate_example(config, rng, _)
-        if ex and isinstance(ex, dict):
+        result = generate_example(config, rng, _)
+        if result:
+            # Handle both list and dict formats
+            ex = result[0] if isinstance(result, list) else result
             span = ex['target_span']
             term_len = len(ex['term'])
-            
+
             if ex['steps_total'] > 0:
                 if 0 <= span[0] < span[1] <= term_len:
                     span_ok += 1
@@ -1236,13 +1301,14 @@ def validate_mode(args, config: Config):
         if term:
             reducer = TreeReducer(5)
             trace, _ = reducer.reduce(term)
-            
+
             for t, path in trace:
-                if path:
+                # path is None means NF, empty list means redex at root
+                if path is not None:
                     node_id = path_to_node_id(path)
                     r_db = Renderer.to_debruijn_with_spans(t)
                     r_named = Renderer.to_named_with_spans(t)
-                    
+
                     if node_id in r_db.spans and node_id in r_named.spans:
                         path_ok += 1
                         break
@@ -1263,6 +1329,114 @@ def validate_mode(args, config: Config):
         print(f"FAILURES: {failed} test groups failed")
         print('='*60)
         return False
+
+# ============================================================================
+# MULTIPROCESSING
+# ============================================================================
+
+def worker_process(worker_id: int, config: Config, queue: mp.Queue, count_target: Optional[int]):
+    #Worker process for parallel example generation.#
+    # Each worker gets its own RNG seeded differently
+    base_seed = config.seed if config.seed else 42
+    worker_seed = base_seed + worker_id * 10000
+    rng = random.Random(worker_seed)
+
+    draw_index = worker_id
+    examples_generated = 0
+
+    try:
+        while True:
+            if count_target and examples_generated >= count_target:
+                break
+
+            example = generate_example(config, rng, draw_index)
+            if example:
+                if isinstance(example, list):
+                    # Full trace - send all examples
+                    for ex in example:
+                        queue.put(('example', ex))
+                        examples_generated += 1
+                else:
+                    queue.put(('example', example))
+                    examples_generated += 1
+
+            draw_index += mp.cpu_count()  # Interleave draw indices across workers
+
+    except KeyboardInterrupt:
+        pass
+    finally:
+        queue.put(('done', worker_id))
+
+
+def live_mode_mp(args, config: Config, num_workers: int = None):
+    #Multiprocessing version of live mode for high throughput.#
+    if num_workers is None:
+        num_workers = min(8, mp.cpu_count())  # Default to 8 or CPU count
+
+    out_file = sys.stdout if args.out == '-' else open(args.out, 'w', buffering=1)
+    metrics = Metrics()
+
+    count_per_worker = None
+    if args.max_terms:
+        count_per_worker = (args.max_terms + num_workers - 1) // num_workers
+
+    sys.stderr.write(f"[Starting {num_workers}-process generation to {args.out}]\n")
+    sys.stderr.flush()
+
+    # Create queue and workers
+    queue = mp.Queue(maxsize=num_workers * 100)
+    workers = []
+
+    for i in range(num_workers):
+        p = mp.Process(target=worker_process, args=(i, config, queue, count_per_worker))
+        p.start()
+        workers.append(p)
+
+    active_workers = num_workers
+    last_metric_time = time.time()
+
+    try:
+        while active_workers > 0:
+            msg_type, data = queue.get()
+
+            if msg_type == 'example':
+                t0 = time.time()
+                out_file.write(json.dumps(data) + '\n')
+                metrics.update(data, time.time() - t0)
+
+                # Periodic metrics
+                if time.time() - last_metric_time > 5.0:
+                    report = metrics.report()
+                    sys.stderr.write(
+                        f"\r[{report['examples']} ex | "
+                        f"{report['examples_per_sec']:.1f}/s | "
+                        f"steps:{report['mean_steps']:.1f} | "
+                        f"size:{report['mean_size']:.1f}]"
+                    )
+                    sys.stderr.flush()
+                    last_metric_time = time.time()
+                    metrics.reset_recent()
+
+                if args.max_terms and metrics.count >= args.max_terms:
+                    break
+
+            elif msg_type == 'done':
+                active_workers -= 1
+
+    except KeyboardInterrupt:
+        sys.stderr.write("\n[Interrupted]\n")
+    finally:
+        for p in workers:
+            p.terminate()
+            p.join(timeout=1.0)
+
+        if out_file != sys.stdout:
+            out_file.close()
+
+        final_report = metrics.report()
+        sys.stderr.write(f"\n\n[Final: {final_report['examples']} examples "
+                        f"at {final_report['examples_per_sec']:.1f}/s]\n")
+
 
 # ============================================================================
 # CLI
@@ -1292,6 +1466,7 @@ def parse_args():
     live.add_argument('--buffer-size', type=int, default=1, help='Deprecated: flush is now automatic')
     live.add_argument('--no-ansi', action='store_true')
     live.add_argument('--metrics-json', type=str, help='Emit JSON metrics every N seconds (e.g., 5s)')
+    live.add_argument('--workers', type=int, help='Number of parallel workers (enables multiprocessing mode)')
     
     test = subparsers.add_parser('test')
     test.add_argument('--n', type=int, default=20)
@@ -1369,9 +1544,12 @@ def main():
     
     sys.stderr.write("=" * 60 + "\n")
     sys.stderr.flush()
-    
+
     if args.mode == 'live':
-        live_mode(args, config)
+        if hasattr(args, 'workers') and args.workers:
+            live_mode_mp(args, config, num_workers=args.workers)
+        else:
+            live_mode(args, config)
     elif args.mode == 'test':
         test_mode(args, config)
     elif args.mode == 'validate':
