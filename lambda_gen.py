@@ -653,8 +653,6 @@ class GraphReducer:
         self.max_steps = max_steps
         self.thunk_evals = 0
         self.thunk_hits = 0
-        # Track evaluated thunks separately to avoid mutating nodes
-        self.thunk_cache: Dict[int, GraphNode] = {}
     
     def term_to_graph(self, term: Term, env: Optional[List[GraphNode]] = None) -> GraphNode:
         #Convert tree term to graph node.#
@@ -757,18 +755,24 @@ class GraphReducer:
             return GraphNode(NodeKind.APP, left=new_left, right=new_right, env=env)
     
     def _force(self, thunk: GraphNode) -> GraphNode:
-        #Force a thunk, using external cache to avoid mutating nodes.#
+        #Force a thunk, caching the result in the node itself.#
         if thunk.kind != NodeKind.THUNK:
             return thunk
 
-        thunk_id = id(thunk)
-        if thunk_id in self.thunk_cache:
+        # Check if already evaluated using the node's own cache
+        if thunk.evaluated and thunk.cache is not None:
             self.thunk_hits += 1
-            return self.thunk_cache[thunk_id]
+            return thunk.cache
 
+        # Evaluate the thunk
         self.thunk_evals += 1
+        assert thunk.body is not None and thunk.env is not None
         value = self._instantiate(thunk.body, thunk.env)
-        self.thunk_cache[thunk_id] = value
+
+        # Cache the result in the thunk node itself
+        thunk.evaluated = True
+        thunk.cache = value
+
         return value
 
 # ============================================================================
