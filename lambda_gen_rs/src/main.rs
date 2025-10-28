@@ -1,253 +1,144 @@
-//! Lambda Calculus Training Data Generator (Rust)
-//!
-//! High-performance parallel generation pipeline with complete wall clock metadata.
+//! Lambda Calculus generator CLI
 
-use clap::{Parser, Subcommand};
-use lambda_gen_rs::*;
+use lambda_gen_rs::{GeneratorConfig, ParallelPipeline, PipelineConfig, ReductionConfig};
+use std::env;
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 use std::time::Instant;
 
-#[derive(Parser)]
-#[command(name = "lambda-gen")]
-#[command(about = "High-performance Lambda Calculus training data generator", long_about = None)]
-struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-}
+fn main() {
+    let args: Vec<String> = env::args().collect();
 
-#[derive(Subcommand)]
-enum Commands {
-    /// Generate training data in parallel
-    Generate {
-        /// Number of parallel workers (default: number of CPUs)
-        #[arg(short, long)]
-        workers: Option<usize>,
-
-        /// Maximum number of terms to generate
-        #[arg(short, long)]
-        max_terms: Option<usize>,
-
-        /// Output file (JSONL format)
-        #[arg(short, long, default_value = "train.jsonl")]
-        output: String,
-
-        /// Maximum term depth
-        #[arg(long, default_value_t = 4)]
-        max_depth: usize,
-
-        /// Minimum term depth
-        #[arg(long, default_value_t = 2)]
-        min_depth: usize,
-
-        /// Maximum term size
-        #[arg(long, default_value_t = 20)]
-        max_size: usize,
-
-        /// Wall clock limit in milliseconds
-        #[arg(long, default_value_t = 50.0)]
-        wall_clock_limit_ms: f64,
-
-        /// Allow divergent terms
-        #[arg(long)]
-        allow_divergent: bool,
-
-        /// Random seed
-        #[arg(long, default_value_t = 42)]
-        seed: u64,
-    },
-
-    /// Run benchmarks
-    Bench {
-        /// Number of workers to test
-        #[arg(short, long, default_value_t = 16)]
-        workers: usize,
-
-        /// Number of terms per test
-        #[arg(short, long, default_value_t = 1000)]
-        terms: usize,
-    },
-}
-
-fn main() -> std::io::Result<()> {
-    let cli = Cli::parse();
-
-    match cli.command {
-        Commands::Generate {
-            workers,
-            max_terms,
-            output,
-            max_depth,
-            min_depth,
-            max_size,
-            wall_clock_limit_ms,
-            allow_divergent,
-            seed,
-        } => {
-            run_generation(
-                workers,
-                max_terms,
-                &output,
-                max_depth,
-                min_depth,
-                max_size,
-                wall_clock_limit_ms,
-                allow_divergent,
-                seed,
-            )
-        }
-        Commands::Bench { workers, terms } => run_benchmark(workers, terms),
+    if args.len() < 2 {
+        eprintln!("Usage: {} <command> [options]", args[0]);
+        eprintln!("Commands:");
+        eprintln!("  generate <output_file> <num_terms> [num_workers] [wall_clock_ms]");
+        eprintln!("  benchmark <num_terms> [num_workers]");
+        std::process::exit(1);
     }
-}
 
-fn run_generation(
-    workers: Option<usize>,
-    max_terms: Option<usize>,
-    output: &str,
-    max_depth: usize,
-    min_depth: usize,
-    max_size: usize,
-    wall_clock_limit_ms: f64,
-    allow_divergent: bool,
-    seed: u64,
-) -> std::io::Result<()> {
-    let num_workers = workers.unwrap_or_else(num_cpus::get);
+    let command = &args[1];
 
-    eprintln!("┌─────────────────────────────────────────────────────────┐");
-    eprintln!("│   Lambda Calculus Generator (Rust)                     │");
-    eprintln!("└─────────────────────────────────────────────────────────┘");
-    eprintln!();
-    eprintln!("Configuration:");
-    eprintln!("  Workers: {}", num_workers);
-    eprintln!("  Max terms: {}", max_terms.map_or("unlimited".to_string(), |n| n.to_string()));
-    eprintln!("  Depth: {}-{}", min_depth, max_depth);
-    eprintln!("  Max size: {}", max_size);
-    eprintln!("  Wall clock limit: {}ms", wall_clock_limit_ms);
-    eprintln!("  Allow divergent: {}", allow_divergent);
-    eprintln!("  Output: {}", output);
-    eprintln!();
-
-    // Create output file
-    let file = File::create(output)?;
-    let mut writer = BufWriter::new(file);
-
-    // Setup pipeline
-    let config = PipelineConfig {
-        num_workers,
-        generator_config: GeneratorConfig {
-            max_depth,
-            min_depth,
-            max_size,
-            allow_divergent,
-        },
-        reduction_config: ReductionConfig {
-            wall_clock_limit_ms,
-            max_steps: 10000,
-        },
-        strategy: "levy_like".to_string(),
-        render: "debruijn".to_string(),
-        seed,
-        max_terms,
-    };
-
-    let pipeline = ParallelPipeline::new(config);
-
-    // Metrics
-    let count = Arc::new(AtomicUsize::new(0));
-    let count_clone = count.clone();
-    let start_time = Instant::now();
-    let last_report = Arc::new(AtomicUsize::new(0));
-    let last_report_clone = last_report.clone();
-
-    // Progress reporting thread
-    let progress_handle = std::thread::spawn(move || {
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            let current = count_clone.load(Ordering::Relaxed);
-            let elapsed = start_time.elapsed().as_secs_f64();
-            let rate = current as f64 / elapsed;
-
-            let last = last_report_clone.swap(current, Ordering::Relaxed);
-            let recent_rate = (current - last) as f64 / 2.0;
-
-            eprint!("\r[{} examples | {:.1}/s | recent {:.1}/s]",
-                current, rate, recent_rate);
-            let _ = std::io::stderr().flush();
-
-            if let Some(max) = max_terms {
-                if current >= max {
-                    break;
-                }
+    match command.as_str() {
+        "generate" => {
+            if args.len() < 4 {
+                eprintln!("Usage: {} generate <output_file> <num_terms> [num_workers] [wall_clock_ms]", args[0]);
+                std::process::exit(1);
             }
+
+            let output_file = &args[2];
+            let num_terms: usize = args[3].parse().expect("Invalid num_terms");
+            let num_workers = if args.len() > 4 {
+                args[4].parse().expect("Invalid num_workers")
+            } else {
+                8
+            };
+            let wall_clock_ms = if args.len() > 5 {
+                args[5].parse().expect("Invalid wall_clock_ms")
+            } else {
+                100.0
+            };
+
+            println!("Generating {} terms with {} workers...", num_terms, num_workers);
+            println!("Wall clock limit: {}ms per term", wall_clock_ms);
+
+            let config = PipelineConfig {
+                num_workers,
+                generator_config: GeneratorConfig {
+                    max_depth: 6,
+                    min_depth: 2,
+                    max_size: 50,
+                    allow_divergent: true,
+                },
+                reduction_config: ReductionConfig {
+                    wall_clock_limit_ms: wall_clock_ms,
+                    max_steps: 10000,
+                },
+                strategy: "levy_like".to_string(),
+                render: "debruijn".to_string(),
+                seed: 42,
+                max_terms: Some(num_terms),
+            };
+
+            let pipeline = ParallelPipeline::new(config);
+            let start = Instant::now();
+
+            let file = File::create(output_file).expect("Failed to create output file");
+            let writer = BufWriter::new(file);
+            let writer = std::sync::Arc::new(std::sync::Mutex::new(writer));
+            let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+            let writer_clone = writer.clone();
+            let count_clone = count.clone();
+
+            pipeline.generate(move |example| {
+                let json = example.to_json();
+                {
+                    let mut w = writer_clone.lock().unwrap();
+                    writeln!(w, "{}", json).expect("Failed to write");
+                }
+                let c = count_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                if c % 100 == 0 {
+                    print!("\rGenerated {} examples...", c);
+                    std::io::stdout().flush().unwrap();
+                }
+            });
+
+            let final_count = count.load(std::sync::atomic::Ordering::Relaxed);
+            let elapsed = start.elapsed();
+            println!("\n\nGenerated {} examples in {:.2}s", final_count, elapsed.as_secs_f64());
+            println!("Throughput: {:.2} examples/s", final_count as f64 / elapsed.as_secs_f64());
         }
-    });
 
-    // Generate with callback
-    let total = pipeline.generate(|example| {
-        // Write as JSONL
-        if let Ok(json) = serde_json::to_string(&example) {
-            let _ = writeln!(writer, "{}", json);
-            count.fetch_add(1, Ordering::Relaxed);
+        "benchmark" => {
+            if args.len() < 3 {
+                eprintln!("Usage: {} benchmark <num_terms> [num_workers]", args[0]);
+                std::process::exit(1);
+            }
+
+            let num_terms: usize = args[2].parse().expect("Invalid num_terms");
+            let num_workers = if args.len() > 3 {
+                args[3].parse().expect("Invalid num_workers")
+            } else {
+                8
+            };
+
+            println!("Benchmarking with {} terms and {} workers...", num_terms, num_workers);
+
+            let config = PipelineConfig {
+                num_workers,
+                generator_config: GeneratorConfig::default(),
+                reduction_config: ReductionConfig::default(),
+                strategy: "levy_like".to_string(),
+                render: "debruijn".to_string(),
+                seed: 42,
+                max_terms: Some(num_terms),
+            };
+
+            let pipeline = ParallelPipeline::new(config);
+            let start = Instant::now();
+
+            let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let count_clone = count.clone();
+
+            pipeline.generate(move |_example| {
+                let c = count_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                if c % 100 == 0 {
+                    print!("\rProcessed {} examples...", c);
+                    std::io::stdout().flush().unwrap();
+                }
+            });
+
+            let final_count = count.load(std::sync::atomic::Ordering::Relaxed);
+            let elapsed = start.elapsed();
+            println!("\n\nProcessed {} examples in {:.2}s", final_count, elapsed.as_secs_f64());
+            println!("Throughput: {:.2} examples/s", final_count as f64 / elapsed.as_secs_f64());
         }
-    });
 
-    // Wait for progress thread
-    drop(progress_handle);
-
-    writer.flush()?;
-
-    let elapsed = start_time.elapsed().as_secs_f64();
-    let throughput = total as f64 / elapsed;
-
-    eprintln!("\n");
-    eprintln!("┌─────────────────────────────────────────────────────────┐");
-    eprintln!("│   Generation Complete                                   │");
-    eprintln!("└─────────────────────────────────────────────────────────┘");
-    eprintln!();
-    eprintln!("Results:");
-    eprintln!("  Total examples: {}", total);
-    eprintln!("  Time: {:.2}s", elapsed);
-    eprintln!("  Throughput: {:.1} examples/s", throughput);
-    eprintln!("  Per-worker: {:.1} examples/s", throughput / num_workers as f64);
-    eprintln!();
-
-    Ok(())
-}
-
-fn run_benchmark(workers: usize, terms: usize) -> std::io::Result<()> {
-    eprintln!("┌─────────────────────────────────────────────────────────┐");
-    eprintln!("│   Throughput Benchmark                                  │");
-    eprintln!("└─────────────────────────────────────────────────────────┘");
-    eprintln!();
-
-    let worker_counts = vec![1, 2, 4, 8, workers];
-
-    for num_workers in worker_counts {
-        eprintln!("Testing {} workers...", num_workers);
-
-        let config = PipelineConfig {
-            num_workers,
-            max_terms: Some(terms),
-            ..Default::default()
-        };
-
-        let pipeline = ParallelPipeline::new(config);
-        let start = Instant::now();
-
-        let total = pipeline.generate(|_| {
-            // Discard output for benchmark
-        });
-
-        let elapsed = start.elapsed().as_secs_f64();
-        let throughput = total as f64 / elapsed;
-
-        eprintln!("  {} workers: {:.1} examples/s ({:.1} per-worker)",
-            num_workers, throughput, throughput / num_workers as f64);
+        _ => {
+            eprintln!("Unknown command: {}", command);
+            eprintln!("Available commands: generate, benchmark");
+            std::process::exit(1);
+        }
     }
-
-    eprintln!();
-
-    Ok(())
 }
