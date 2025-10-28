@@ -417,6 +417,13 @@ class LambdaDataset(Dataset):
         # Check if this is a normal form (no redex)
         is_nf = (start_char == 0 and end_char == 0)
         
+        # Extract fuel budget metrics from metadata (with defaults for backwards compatibility)
+        meta = ex.get('meta', {})
+        fuel_remaining = meta.get('fuel_remaining', 0)
+        fuel_consumed_ratio = meta.get('fuel_consumed_ratio', 0.0)
+        is_pathological = meta.get('is_pathological', False)
+        size_growth_rate = meta.get('size_growth_rate', 1.0)
+
         return {
             'input_ids': torch.tensor(token_ids, dtype=torch.long),
             'offsets': offsets,
@@ -425,6 +432,11 @@ class LambdaDataset(Dataset):
             'is_nf': is_nf,
             'steps_total': ex['steps_total'],
             'length': len(token_ids),
+            # Fuel budget metrics
+            'fuel_remaining': fuel_remaining,
+            'fuel_consumed_ratio': fuel_consumed_ratio,
+            'is_pathological': is_pathological,
+            'size_growth_rate': size_growth_rate,
         }
     
     def _truncate(self, token_ids: List[int], offsets: List[Tuple[int, int]], 
@@ -451,14 +463,20 @@ def collate_fn(batch: List[Dict[str, Any]], pad_id: int) -> Dict[str, torch.Tens
     #
     max_len = max(item['length'] for item in batch)
     batch_size = len(batch)
-    
+
     input_ids = torch.full((batch_size, max_len), pad_id, dtype=torch.long)
     attention_mask = torch.zeros(batch_size, max_len, dtype=torch.bool)
     start_labels = torch.zeros(batch_size, dtype=torch.long)
     end_labels = torch.zeros(batch_size, dtype=torch.long)
     is_nf = torch.zeros(batch_size, dtype=torch.float)
     steps_total = torch.zeros(batch_size, dtype=torch.float)
-    
+
+    # Fuel budget metrics
+    fuel_remaining = torch.zeros(batch_size, dtype=torch.float)
+    fuel_consumed_ratio = torch.zeros(batch_size, dtype=torch.float)
+    is_pathological = torch.zeros(batch_size, dtype=torch.float)
+    size_growth_rate = torch.zeros(batch_size, dtype=torch.float)
+
     for i, item in enumerate(batch):
         seq_len = item['length']
         input_ids[i, :seq_len] = item['input_ids']
@@ -467,7 +485,12 @@ def collate_fn(batch: List[Dict[str, Any]], pad_id: int) -> Dict[str, torch.Tens
         end_labels[i] = item['end_idx']
         is_nf[i] = float(item['is_nf'])
         steps_total[i] = float(item['steps_total'])
-    
+        # Fuel metrics
+        fuel_remaining[i] = float(item.get('fuel_remaining', 0))
+        fuel_consumed_ratio[i] = float(item.get('fuel_consumed_ratio', 0.0))
+        is_pathological[i] = float(item.get('is_pathological', False))
+        size_growth_rate[i] = float(item.get('size_growth_rate', 1.0))
+
     return {
         'input_ids': input_ids,
         'attention_mask': attention_mask,
@@ -475,6 +498,11 @@ def collate_fn(batch: List[Dict[str, Any]], pad_id: int) -> Dict[str, torch.Tens
         'end_labels': end_labels,
         'is_nf': is_nf,
         'steps_total': steps_total,
+        # Fuel budget metrics (for logging and analysis)
+        'fuel_remaining': fuel_remaining,
+        'fuel_consumed_ratio': fuel_consumed_ratio,
+        'is_pathological': is_pathological,
+        'size_growth_rate': size_growth_rate,
     }
 
 
@@ -1264,12 +1292,21 @@ class Trainer:
         # Compute metrics
         with torch.no_grad():
             metrics = compute_span_metrics(outputs, batch)
-        
+
         # Track metrics
         for k, v in loss_dict.items():
             self.train_metrics[k].append(v)
         for k, v in metrics.items():
             self.train_metrics[k].append(v)
+
+        # Track fuel budget metrics
+        if 'is_pathological' in batch:
+            pathological_ratio = batch['is_pathological'].mean().item()
+            avg_fuel_consumed = batch['fuel_consumed_ratio'].mean().item()
+            avg_growth = batch['size_growth_rate'].mean().item()
+            self.train_metrics['pathological_ratio'].append(pathological_ratio)
+            self.train_metrics['avg_fuel_consumed'].append(avg_fuel_consumed)
+            self.train_metrics['avg_growth'].append(avg_growth)
     
     def evaluate(self) -> float:
         #Run evaluation on validation set.#
@@ -1364,11 +1401,17 @@ class Trainer:
         tokens_per_sec = self.config.batch_tokens / avg_metrics.get('step_time', 1.0)
         
         # Console
-        print(f"Step {self.step} | Loss: {avg_metrics['loss']:.4f} | "
-              f"EM: {avg_metrics['exact_match']:.3f} | "
-              f"IoU: {avg_metrics['span_iou']:.3f} | "
-              f"LR: {self.scheduler.get_last_lr()[0]:.2e} | "
-              f"{tokens_per_sec:.0f} tok/s")
+        status_msg = (f"Step {self.step} | Loss: {avg_metrics['loss']:.4f} | "
+                     f"EM: {avg_metrics['exact_match']:.3f} | "
+                     f"IoU: {avg_metrics['span_iou']:.3f} | "
+                     f"LR: {self.scheduler.get_last_lr()[0]:.2e} | "
+                     f"{tokens_per_sec:.0f} tok/s")
+
+        # Add pathological warning if present
+        if 'pathological_ratio' in avg_metrics and avg_metrics['pathological_ratio'] > 0.05:
+            status_msg += f" | ⚠️ path={avg_metrics['pathological_ratio']:.1%}"
+
+        print(status_msg)
         
         # TensorBoard
         if self.writer:
@@ -1376,6 +1419,13 @@ class Trainer:
                 self.writer.add_scalar(f'train/{k}', v, self.step)
             self.writer.add_scalar('train/lr', self.scheduler.get_last_lr()[0], self.step)
             self.writer.add_scalar('train/tokens_per_sec', tokens_per_sec, self.step)
+            # Log fuel budget metrics if available
+            if 'pathological_ratio' in avg_metrics:
+                self.writer.add_scalar('train/pathological_ratio', avg_metrics['pathological_ratio'], self.step)
+            if 'avg_fuel_consumed' in avg_metrics:
+                self.writer.add_scalar('train/avg_fuel_consumed', avg_metrics['avg_fuel_consumed'], self.step)
+            if 'avg_growth' in avg_metrics:
+                self.writer.add_scalar('train/avg_size_growth', avg_metrics['avg_growth'], self.step)
     
     def _log_validation(self, val_loss: float):
         #Log validation metrics.#
