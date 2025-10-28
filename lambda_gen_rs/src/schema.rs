@@ -3,19 +3,17 @@
 //! This module defines the exact JSON schema matching the Python implementation,
 //! including ALL runtime awareness fields.
 
-use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// Complete training example with ALL metadata fields
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TrainingExample {
     pub strategy: String,
     pub render: String,
     pub term: String,
     pub step_k: usize,
     pub target_span: (usize, usize),
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub next_term: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub normal_form: Option<String>,
     pub steps_total: usize,
     pub diverged: bool,
@@ -24,7 +22,7 @@ pub struct TrainingExample {
 }
 
 /// COMPLETE metadata matching Python implementation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ExampleMetadata {
     // Term structure
     pub size: usize,
@@ -130,6 +128,80 @@ impl ExampleMetadata {
     }
 }
 
+impl TrainingExample {
+    /// Serialize to JSONL format
+    pub fn to_json(&self) -> String {
+        let mut json = String::from("{");
+
+        json.push_str(&format!("\"strategy\":\"{}\",", escape_json(&self.strategy)));
+        json.push_str(&format!("\"render\":\"{}\",", escape_json(&self.render)));
+        json.push_str(&format!("\"term\":\"{}\",", escape_json(&self.term)));
+        json.push_str(&format!("\"step_k\":{},", self.step_k));
+        json.push_str(&format!("\"target_span\":[{},{}],", self.target_span.0, self.target_span.1));
+
+        if let Some(ref next) = self.next_term {
+            json.push_str(&format!("\"next_term\":\"{}\",", escape_json(next)));
+        } else {
+            json.push_str("\"next_term\":null,");
+        }
+
+        if let Some(ref nf) = self.normal_form {
+            json.push_str(&format!("\"normal_form\":\"{}\",", escape_json(nf)));
+        } else {
+            json.push_str("\"normal_form\":null,");
+        }
+
+        json.push_str(&format!("\"steps_total\":{},", self.steps_total));
+        json.push_str(&format!("\"diverged\":{},", self.diverged));
+        json.push_str(&format!("\"trace_id\":\"{}\",", escape_json(&self.trace_id)));
+
+        // Metadata
+        json.push_str("\"meta\":{");
+        json.push_str(&format!("\"size\":{},", self.meta.size));
+        json.push_str(&format!("\"depth\":{},", self.meta.depth));
+        json.push_str("\"libs\":[");
+        for (i, lib) in self.meta.libs.iter().enumerate() {
+            if i > 0 { json.push(','); }
+            json.push_str(&format!("\"{}\"", escape_json(lib)));
+        }
+        json.push_str("],");
+        json.push_str(&format!("\"seed\":{},", self.meta.seed));
+        json.push_str(&format!("\"draw_index\":{},", self.meta.draw_index));
+        json.push_str(&format!("\"uid\":\"{}\",", escape_json(&self.meta.uid)));
+        json.push_str(&format!("\"thunk_evals\":{},", self.meta.thunk_evals));
+        json.push_str(&format!("\"thunk_hits\":{},", self.meta.thunk_hits));
+        json.push_str(&format!("\"schema_version\":\"{}\",", escape_json(&self.meta.schema_version)));
+        json.push_str(&format!("\"term_hash\":\"{}\",", escape_json(&self.meta.term_hash)));
+        json.push_str(&format!("\"step_ms\":{},", self.meta.step_ms));
+        json.push_str(&format!("\"avg_step_ms\":{},", self.meta.avg_step_ms));
+        json.push_str(&format!("\"total_time_ms\":{},", self.meta.total_time_ms));
+        json.push_str(&format!("\"wall_clock_limit_ms\":{},", self.meta.wall_clock_limit_ms));
+        json.push_str(&format!("\"time_remaining_ms\":{},", self.meta.time_remaining_ms));
+        json.push_str(&format!("\"time_consumed_ratio\":{},", self.meta.time_consumed_ratio));
+        json.push_str(&format!("\"is_pathological\":{},", self.meta.is_pathological));
+        json.push_str(&format!("\"size_growth_rate\":{},", self.meta.size_growth_rate));
+        json.push_str(&format!("\"initial_size\":{}", self.meta.initial_size));
+        json.push_str("}");
+
+        json.push('}');
+        json
+    }
+}
+
+/// Escape JSON strings
+fn escape_json(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| match c {
+            '"' => vec!['\\', '"'],
+            '\\' => vec!['\\', '\\'],
+            '\n' => vec!['\\', 'n'],
+            '\r' => vec!['\\', 'r'],
+            '\t' => vec!['\\', 't'],
+            c => vec![c],
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,7 +233,21 @@ mod tests {
             false, 1.2, 10
         );
 
-        let json = serde_json::to_string(&meta).unwrap();
+        let example = TrainingExample {
+            strategy: "levy_like".to_string(),
+            render: "debruijn".to_string(),
+            term: "\\.(\\.(10))".to_string(),
+            step_k: 0,
+            target_span: (0, 10),
+            next_term: None,
+            normal_form: None,
+            steps_total: 5,
+            diverged: false,
+            trace_id: "test-trace".to_string(),
+            meta,
+        };
+
+        let json = example.to_json();
         assert!(json.contains("step_ms"));
         assert!(json.contains("time_consumed_ratio"));
         assert!(json.contains("is_pathological"));

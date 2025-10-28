@@ -4,8 +4,33 @@
 //! Ensures terms are reducible or in normal form.
 
 use crate::term::Term;
-use rand::Rng;
-use rand_chacha::ChaCha8Rng;
+
+/// Simple, fast random number generator (LCG)
+pub struct SimpleRng {
+    state: u64,
+}
+
+impl SimpleRng {
+    pub fn seed_from_u64(seed: u64) -> Self {
+        SimpleRng {
+            state: seed.wrapping_add(1),
+        }
+    }
+
+    pub fn next_u64(&mut self) -> u64 {
+        // LCG constants from Numerical Recipes
+        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.state
+    }
+
+    pub fn gen_range(&mut self, min: u32, max: u32) -> u32 {
+        if min >= max {
+            return min;
+        }
+        let range = max - min;
+        min + (self.next_u64() % range as u64) as u32
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct GeneratorConfig {
@@ -36,7 +61,7 @@ impl TermGenerator {
     }
 
     /// Generate a random term within configured constraints
-    pub fn generate(&self, rng: &mut ChaCha8Rng) -> Option<Term> {
+    pub fn generate(&self, rng: &mut SimpleRng) -> Option<Term> {
         for _attempt in 0..100 {
             let term = self.generate_term(rng, 0, self.config.max_depth, 0)?;
 
@@ -51,29 +76,29 @@ impl TermGenerator {
     /// Recursive term generation with depth tracking
     fn generate_term(
         &self,
-        rng: &mut ChaCha8Rng,
+        rng: &mut SimpleRng,
         depth: usize,
         max_depth: usize,
         var_context: u32,
     ) -> Option<Term> {
         // Force termination at max depth
         if depth >= max_depth {
-            return Some(Term::Var(rng.gen_range(0..var_context.max(1))));
+            return Some(Term::Var(rng.gen_range(0, var_context.max(1))));
         }
 
         // Bias towards creating interesting terms
         let choice = if depth < self.config.min_depth {
             // Early depth: bias towards Abs and App
-            rng.gen_range(0..10)
+            rng.gen_range(0, 10)
         } else {
             // Later depth: allow all choices
-            rng.gen_range(0..10)
+            rng.gen_range(0, 10)
         };
 
         match choice {
             // Var: 20% probability
             0..=1 if var_context > 0 => {
-                Some(Term::Var(rng.gen_range(0..var_context)))
+                Some(Term::Var(rng.gen_range(0, var_context)))
             }
             // Abs: 40% probability
             2..=5 => {
@@ -93,13 +118,12 @@ impl TermGenerator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::SeedableRng;
 
     #[test]
     fn test_generation() {
         let config = GeneratorConfig::default();
         let generator = TermGenerator::new(config);
-        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let mut rng = SimpleRng::seed_from_u64(42);
 
         let term = generator.generate(&mut rng);
         assert!(term.is_some());
@@ -118,7 +142,7 @@ mod tests {
             allow_divergent: true,
         };
         let generator = TermGenerator::new(config);
-        let mut rng = ChaCha8Rng::seed_from_u64(123);
+        let mut rng = SimpleRng::seed_from_u64(123);
 
         for _ in 0..10 {
             if let Some(term) = generator.generate(&mut rng) {

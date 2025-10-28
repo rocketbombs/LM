@@ -7,8 +7,8 @@
 //! - Per-step timing for runtime-aware training data
 
 use crate::term::{Term, TermArena, TermId, TermNode, TermType};
-use instant::Instant;
 use std::collections::HashMap;
+use std::time::Instant;
 
 /// Configuration for reduction
 #[derive(Debug, Clone)]
