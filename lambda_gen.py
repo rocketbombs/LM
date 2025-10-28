@@ -624,13 +624,57 @@ class GraphReducer:
     #Child nodes receive the same env reference, which is read-only throughout.
     #
 
-    def __init__(self, max_steps: int):
+    def __init__(self, max_steps: int, collect_sharing_metrics: bool = True):
         self.max_steps = max_steps
+        self.collect_sharing_metrics = collect_sharing_metrics
         self.thunk_evals = 0
         self.thunk_hits = 0
+        # Structural sharing metrics (syntactic duplication pressure)
+        self.bind_edges = 0        # Total binder uses across all β-reductions
+        self.bind_edges_saved = 0  # Binder uses beyond first (duplication avoided)
+        self.shared_bindings = 0   # Number of β-reductions where binder used >1 time
         # Track evaluated thunks separately to avoid mutating nodes
         self.thunk_cache: Dict[int, GraphNode] = {}
     
+    def _count_var_uses_in_graph(self, node: GraphNode, target_var: int, depth: int = 0,
+                                  cache: Optional[Dict[Tuple[int, int, int], int]] = None) -> int:
+        """Count uses of a de Bruijn index in a graph node (direct traversal with memoization).
+
+        This avoids expensive tree projection. At β-reduction (λ.body) arg,
+        we count uses of index 0 in body to measure duplication pressure.
+
+        Uses memoization: when a shared node is encountered, we compute the count once
+        and return the cached result on subsequent encounters. This gives correct
+        syntactic occurrence counts while avoiding exponential traversal time.
+        """
+        if cache is None:
+            cache = {}
+
+        # Cache key: (node_id, target_var, depth)
+        cache_key = (id(node), target_var, depth)
+        if cache_key in cache:
+            return cache[cache_key]
+
+        if node.kind == NodeKind.VAR:
+            # VAR nodes reference their binding via env, but we want syntactic count
+            # A VAR with var=N at depth D refers to index N in the term structure
+            result = 1 if node.var == target_var + depth else 0
+        elif node.kind == NodeKind.ABS:
+            # Under abstraction, target shifts by 1
+            result = self._count_var_uses_in_graph(node.body, target_var, depth + 1, cache)
+        elif node.kind == NodeKind.APP:
+            left_uses = self._count_var_uses_in_graph(node.left, target_var, depth, cache)
+            right_uses = self._count_var_uses_in_graph(node.right, target_var, depth, cache)
+            result = left_uses + right_uses
+        elif node.kind == NodeKind.THUNK:
+            # Thunks wrap unevaluated terms - count in the body
+            result = self._count_var_uses_in_graph(node.body, target_var, depth, cache)
+        else:  # VALUE or unknown
+            result = 0
+
+        cache[cache_key] = result
+        return result
+
     def term_to_graph(self, term: Term, env: Optional[List[GraphNode]] = None) -> GraphNode:
         #Convert tree term to graph node.#
         if env is None:
@@ -646,27 +690,43 @@ class GraphReducer:
             right = self.term_to_graph(term.right, env)
             return GraphNode(NodeKind.APP, left=left, right=right, env=env)
     
-    def reduce(self, term: Term) -> Tuple[List[Tuple[Term, Optional[List[int]]]], bool, int, int]:
-        #Reduce with call-by-need, return trace and sharing stats.#
+    def reduce(self, term: Term) -> Tuple[List[Tuple[Term, Optional[List[int]]]], bool, Dict[str, int]]:
+        """Reduce with call-by-need, return trace and comprehensive sharing stats.
+
+        Returns:
+            trace: List of (term, redex_path) pairs
+            diverged: True if max_steps reached
+            metrics: Dict with thunk_evals, thunk_hits, bind_edges, bind_edges_saved, shared_bindings
+        """
         graph = self.term_to_graph(term)
         trace = []
-        
+
         for step in range(self.max_steps):
             tree_proj = graph.to_tree()
             redex_path = self._find_redex(tree_proj)
             trace.append((tree_proj, redex_path))
-            
+
             # CRITICAL FIX #1: None means NF, [] means root redex
             # Bug was: if not redex_path: treats [] (root redex) as falsy
             if redex_path is None:
-                return trace, False, self.thunk_evals, self.thunk_hits
-            
+                return trace, False, self._get_sharing_metrics()
+
             graph = self._reduce_at_path(graph, redex_path)
-        
+
         final_tree = graph.to_tree()
         final_redex = self._find_redex(final_tree)
         trace.append((final_tree, final_redex))
-        return trace, True, self.thunk_evals, self.thunk_hits
+        return trace, True, self._get_sharing_metrics()
+
+    def _get_sharing_metrics(self) -> Dict[str, int]:
+        """Return comprehensive sharing metrics."""
+        return {
+            'thunk_evals': self.thunk_evals,
+            'thunk_hits': self.thunk_hits,
+            'bind_edges': self.bind_edges,
+            'bind_edges_saved': self.bind_edges_saved,
+            'shared_bindings': self.shared_bindings,
+        }
     
     def _find_redex(self, term: Term) -> Optional[List[int]]:
         #Find leftmost-outermost redex in projected tree.#
@@ -685,10 +745,26 @@ class GraphReducer:
         return search(term, [])
     
     def _reduce_at_path(self, graph: GraphNode, path: List[int]) -> GraphNode:
-        #Apply β-reduction at path with thunk binding.#
+        """Apply β-reduction at path with thunk binding.
+
+        At root redex, count binder uses to track structural sharing pressure.
+        """
         if not path:
             assert graph.kind == NodeKind.APP and graph.left.kind == NodeKind.ABS
-            arg_thunk = GraphNode(NodeKind.THUNK, body=graph.right, 
+
+            # Count uses of the binder (de Bruijn index 0) in the abstraction body
+            # This measures syntactic duplication pressure that sharing collapses
+            if self.collect_sharing_metrics:
+                body = graph.left.body
+                uses = self._count_var_uses_in_graph(body, target_var=0, depth=0)
+
+                # Track sharing metrics
+                self.bind_edges += uses
+                if uses > 1:
+                    self.bind_edges_saved += (uses - 1)
+                    self.shared_bindings += 1
+
+            arg_thunk = GraphNode(NodeKind.THUNK, body=graph.right,
                                 env=graph.right.env, evaluated=False)
             new_env = [arg_thunk] + (graph.left.env or [])
             return self._instantiate(graph.left.body, new_env)
@@ -815,11 +891,17 @@ def generate_example(config: Config, rng: random.Random, draw_index: int) -> Opt
     try:
         if config.strategy == 'levy_like' and config.share:
             graph_reducer = GraphReducer(config.max_steps)
-            trace, diverged, thunk_evals, thunk_hits = graph_reducer.reduce(term)
+            trace, diverged, sharing_metrics = graph_reducer.reduce(term)
         else:
             tree_reducer = TreeReducer(config.max_steps)
             trace, diverged = tree_reducer.reduce(term)
-            thunk_evals, thunk_hits = 0, 0
+            sharing_metrics = {
+                'thunk_evals': 0,
+                'thunk_hits': 0,
+                'bind_edges': 0,
+                'bind_edges_saved': 0,
+                'shared_bindings': 0,
+            }
     except Exception as e:
         sys.stderr.write(f"\n[Error during reduction: {e}]\n")
         sys.stderr.flush()
@@ -864,8 +946,12 @@ def generate_example(config: Config, rng: random.Random, draw_index: int) -> Opt
                 'seed': config.seed,
                 'draw_index': draw_index,
                 'uid': trace_id,
-                'thunk_evals': thunk_evals,
-                'thunk_hits': thunk_hits,
+                # Sharing metrics (levy_like only)
+                'thunk_evals': sharing_metrics['thunk_evals'],
+                'thunk_hits': sharing_metrics['thunk_hits'],
+                'bind_edges': sharing_metrics['bind_edges'],
+                'bind_edges_saved': sharing_metrics['bind_edges_saved'],
+                'shared_bindings': sharing_metrics['shared_bindings'],
                 'schema_version': SCHEMA_VERSION,
                 'term_hash': term_hash(result.string)
             }
@@ -1234,8 +1320,8 @@ def validate_mode(args, config: Config):
             tree_reducer = TreeReducer(50)
             tree_trace, tree_div = tree_reducer.reduce(term)
             
-            graph_reducer = GraphReducer(50)
-            graph_trace, graph_div, _, _ = graph_reducer.reduce(term)
+            graph_reducer = GraphReducer(50, collect_sharing_metrics=False)
+            graph_trace, graph_div, metrics = graph_reducer.reduce(term)
             
             if not tree_div and not graph_div:
                 tree_nf, _ = tree_trace[-1]
@@ -1311,8 +1397,8 @@ def validate_mode(args, config: Config):
                tree_trace[-1][1] is None)  # Final step has no redex
 
     # Test graph reducer
-    graph_reducer = GraphReducer(10)
-    graph_trace, graph_div, _, _ = graph_reducer.reduce(root_term)
+    graph_reducer = GraphReducer(10, collect_sharing_metrics=False)
+    graph_trace, graph_div, metrics = graph_reducer.reduce(root_term)
     graph_ok = (len(graph_trace) == 2 and not graph_div and
                 graph_trace[-1][1] is None)  # Final step has no redex
 
