@@ -33,8 +33,9 @@
 #    "steps_total": int,
 #    "diverged": bool,
 #    "trace_id": str (optional),
-#    "meta": {size, depth, libs, seed, draw_index, uid, thunk_evals, thunk_hits, 
-#             schema_version, term_hash}
+#    "meta": {size, depth, libs, seed, draw_index, uid, thunk_evals, thunk_hits,
+#             schema_version, term_hash, max_steps, fuel_remaining, fuel_consumed_ratio,
+#             is_pathological, size_growth_rate}
 #  }
 
 #USAGE:
@@ -836,6 +837,11 @@ def generate_example(config: Config, rng: random.Random, draw_index: int) -> Opt
     # Model needs to see ALL steps to learn proper reduction sequences
     examples = []
     trace_id = str(uuid.uuid4())
+
+    # Compute initial term size for growth tracking
+    initial_term, _ = trace[0]
+    initial_size = initial_term.size()
+
     for step_k in range(len(trace)):
         current_term, redex_path = trace[step_k]
 
@@ -848,17 +854,31 @@ def generate_example(config: Config, rng: random.Random, draw_index: int) -> Opt
         # Bug was: redex_path or [] converts None (NF) to [] (root), poisoning labels
         target_span = list(get_redex_span(current_term, redex_path, config.render))
 
+        # Fuel budget metrics for model awareness
+        steps_total = len(trace) - 1
+        fuel_remaining = max(0, config.max_steps - step_k)
+        fuel_consumed_ratio = step_k / config.max_steps if config.max_steps > 0 else 0.0
+
+        # Detect pathological cases
+        current_size = current_term.size()
+        size_growth_rate = (current_size / initial_size) if initial_size > 0 else 1.0
+        is_pathological = (
+            steps_total > config.max_steps * 0.8 or  # Used >80% of fuel
+            size_growth_rate > 3.0 or                 # Size tripled
+            current_size > 200                        # Very large term
+        )
+
         example = {
             'strategy': config.strategy,
             'render': config.render,
             'term': result.string,
             'step_k': step_k,
             'target_span': target_span,
-            'steps_total': len(trace) - 1,
+            'steps_total': steps_total,
             'diverged': diverged,
             'trace_id': trace_id,
             'meta': {
-                'size': current_term.size(),
+                'size': current_size,
                 'depth': current_term.depth(),
                 'libs': config.libraries,
                 'seed': config.seed,
@@ -867,7 +887,14 @@ def generate_example(config: Config, rng: random.Random, draw_index: int) -> Opt
                 'thunk_evals': thunk_evals,
                 'thunk_hits': thunk_hits,
                 'schema_version': SCHEMA_VERSION,
-                'term_hash': term_hash(result.string)
+                'term_hash': term_hash(result.string),
+                # Fuel budget metrics
+                'max_steps': config.max_steps,
+                'fuel_remaining': fuel_remaining,
+                'fuel_consumed_ratio': fuel_consumed_ratio,
+                'is_pathological': is_pathological,
+                'size_growth_rate': size_growth_rate,
+                'initial_size': initial_size
             }
         }
 
@@ -918,7 +945,7 @@ def yield_examples(config: Config) -> Iterator[Dict[str, Any]]:
 
 class Metrics:
     #Track and report generation metrics.#
-    
+
     def __init__(self):
         self.count = 0
         self.tokens = 0
@@ -932,6 +959,10 @@ class Metrics:
         self.start_time = time.time()
         self.last_time = time.time()
         self.recent_count = 0
+        # Pathological case tracking
+        self.pathological_count = 0
+        self.fuel_consumed_ratios = deque(maxlen=1000)
+        self.size_growth_rates = deque(maxlen=1000)
     
     def update(self, example: Dict[str, Any], latency: float):
         self.count += 1
@@ -945,6 +976,11 @@ class Metrics:
         self.thunk_evals_total += example['meta'].get('thunk_evals', 0)
         self.thunk_hits_total += example['meta'].get('thunk_hits', 0)
         self.recent_count += 1
+        # Track pathological cases
+        if example['meta'].get('is_pathological', False):
+            self.pathological_count += 1
+        self.fuel_consumed_ratios.append(example['meta'].get('fuel_consumed_ratio', 0.0))
+        self.size_growth_rates.append(example['meta'].get('size_growth_rate', 1.0))
     
     def percentile(self, values: List[float], p: float) -> float:
         if not values:
@@ -957,16 +993,21 @@ class Metrics:
         now = time.time()
         elapsed = now - self.start_time
         recent_elapsed = now - self.last_time
-        
+
         examples_per_sec = self.count / elapsed if elapsed > 0 else 0
         recent_rate = self.recent_count / recent_elapsed if recent_elapsed > 0 else 0
         tokens_per_sec = self.tokens / elapsed if elapsed > 0 else 0
-        
+
         lat_list = list(self.latencies)
-        
+
         total_thunk_ops = self.thunk_evals_total + self.thunk_hits_total
         share_rate = self.thunk_hits_total / total_thunk_ops if total_thunk_ops > 0 else 0
-        
+
+        # Compute pathological metrics
+        pathological_rate = self.pathological_count / self.count if self.count > 0 else 0
+        avg_fuel_ratio = sum(self.fuel_consumed_ratios) / len(self.fuel_consumed_ratios) if self.fuel_consumed_ratios else 0
+        avg_growth = sum(self.size_growth_rates) / len(self.size_growth_rates) if self.size_growth_rates else 1.0
+
         return {
             'examples': self.count,
             'examples_per_sec': round(examples_per_sec, 1),
@@ -981,7 +1022,12 @@ class Metrics:
             'latency_p99': round(self.percentile(lat_list, 0.99) * 1000, 1),
             'thunk_evals': self.thunk_evals_total,
             'thunk_hits': self.thunk_hits_total,
-            'share_hit_rate': round(share_rate, 3)
+            'share_hit_rate': round(share_rate, 3),
+            # Pathological case metrics
+            'pathological_count': self.pathological_count,
+            'pathological_rate': round(pathological_rate, 3),
+            'avg_fuel_consumed': round(avg_fuel_ratio, 3),
+            'avg_size_growth': round(avg_growth, 2)
         }
     
     def reset_recent(self):
@@ -1042,10 +1088,14 @@ def live_mode(args, config: Config):
                          f"size={report['mean_size']:.1f} depth={report['mean_depth']:.1f} "
                          f"steps={report['mean_steps']:.1f} | p50={report['latency_p50']:.1f}ms "
                          f"p95={report['latency_p95']:.1f}ms")
-                
+
                 if config.share:
                     status += f" | share={report['share_hit_rate']:.3f}"
-                
+
+                # Add pathological case warning if rate is high
+                if report['pathological_rate'] > 0.05:  # >5% pathological
+                    status += f" | ⚠️ path={report['pathological_rate']:.1%}"
+
                 status += "]"
                 sys.stderr.write(f"\r{status}")
                 sys.stderr.flush()
@@ -1075,7 +1125,11 @@ def live_mode(args, config: Config):
             out_file.close()
         final_report = metrics.report()
         sys.stderr.write(f"\n[Complete: {final_report['examples']} examples | "
-                        f"share_rate={final_report['share_hit_rate']:.3f}]\n")
+                        f"share_rate={final_report['share_hit_rate']:.3f} | "
+                        f"pathological={final_report['pathological_count']} "
+                        f"({final_report['pathological_rate']:.1%}) | "
+                        f"avg_fuel={final_report['avg_fuel_consumed']:.1%} | "
+                        f"avg_growth={final_report['avg_size_growth']:.2f}x]\n")
 
 def test_mode(args, config: Config):
     #Preview/test mode with span audit.#
