@@ -629,9 +629,10 @@ class GraphReducer:
     #The model becomes runtime-aware through step_ms metrics in training data.
     #
 
-    def __init__(self, wall_clock_limit_ms: float = 100.0, max_steps: int = 10000):
+    def __init__(self, wall_clock_limit_ms: float = 100.0, max_steps: int = 10000, collect_sharing_metrics: bool = False):
         self.wall_clock_limit_ms = wall_clock_limit_ms  # Primary limiter
         self.max_steps = max_steps  # Safety fallback (should rarely hit)
+        self.collect_sharing_metrics = collect_sharing_metrics  # Whether to compute sharing metrics
         self.thunk_evals = 0
         self.thunk_hits = 0
         # Structural sharing metrics (syntactic duplication pressure)
