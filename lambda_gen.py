@@ -619,14 +619,19 @@ class TreeReducer:
 # ============================================================================
 
 class GraphReducer:
-    #Call-by-need reduction with thunk memoization.
+    #Call-by-need reduction with thunk memoization and wall clock limits.
 
     #Environment semantics: env lists are treated as immutable closures by design.
     #Child nodes receive the same env reference, which is read-only throughout.
     #
+    #Wall clock limiting: Reduction aborts if wall_clock_limit_ms is exceeded.
+    #This ensures predictable throughput independent of term complexity.
+    #The model becomes runtime-aware through step_ms metrics in training data.
+    #
 
-    def __init__(self, max_steps: int):
-        self.max_steps = max_steps
+    def __init__(self, wall_clock_limit_ms: float = 100.0, max_steps: int = 10000):
+        self.wall_clock_limit_ms = wall_clock_limit_ms  # Primary limiter
+        self.max_steps = max_steps  # Safety fallback (should rarely hit)
         self.thunk_evals = 0
         self.thunk_hits = 0
         # Track evaluated thunks separately to avoid mutating nodes
@@ -647,27 +652,58 @@ class GraphReducer:
             right = self.term_to_graph(term.right, env)
             return GraphNode(NodeKind.APP, left=left, right=right, env=env)
     
-    def reduce(self, term: Term) -> Tuple[List[Tuple[Term, Optional[List[int]]]], bool, int, int]:
-        #Reduce with call-by-need, return trace and sharing stats.#
+    def reduce(self, term: Term) -> Tuple[List[Tuple[Term, Optional[List[int]], float]], bool, int, int, float]:
+        #Reduce with call-by-need, return trace with timing stats.
+        #
+        #Returns:
+        #  trace: List[(term, redex_path, step_time_ms)] - each step with timing
+        #  diverged: bool - whether wall clock or step limit was hit
+        #  thunk_evals: int - sharing metric
+        #  thunk_hits: int - sharing metric
+        #  total_time_ms: float - total wall clock time
+        #
         graph = self.term_to_graph(term)
         trace = []
-        
+
+        # Track wall clock time
+        start_time = time.time()
+        last_step_time = start_time
+
         for step in range(self.max_steps):
+            step_start = time.time()
+
+            # Wall clock check BEFORE expensive operations
+            elapsed_ms = (time.time() - start_time) * 1000
+            if elapsed_ms > self.wall_clock_limit_ms:
+                # Exceeded wall clock limit - treat as diverged
+                total_time_ms = elapsed_ms
+                final_tree = graph.to_tree()
+                final_redex = self._find_redex(final_tree)
+                final_step_ms = (time.time() - step_start) * 1000
+                trace.append((final_tree, final_redex, final_step_ms))
+                return trace, True, self.thunk_evals, self.thunk_hits, total_time_ms
+
             tree_proj = graph.to_tree()
             redex_path = self._find_redex(tree_proj)
-            trace.append((tree_proj, redex_path))
-            
+
+            step_time_ms = (time.time() - step_start) * 1000
+            trace.append((tree_proj, redex_path, step_time_ms))
+
             # CRITICAL FIX #1: None means NF, [] means root redex
-            # Bug was: if not redex_path: treats [] (root redex) as falsy
             if redex_path is None:
-                return trace, False, self.thunk_evals, self.thunk_hits
-            
+                total_time_ms = (time.time() - start_time) * 1000
+                return trace, False, self.thunk_evals, self.thunk_hits, total_time_ms
+
             graph = self._reduce_at_path(graph, redex_path)
-        
+            last_step_time = time.time()
+
+        # Hit max_steps (safety fallback)
         final_tree = graph.to_tree()
         final_redex = self._find_redex(final_tree)
-        trace.append((final_tree, final_redex))
-        return trace, True, self.thunk_evals, self.thunk_hits
+        final_step_ms = (time.time() - last_step_time) * 1000
+        trace.append((final_tree, final_redex, final_step_ms))
+        total_time_ms = (time.time() - start_time) * 1000
+        return trace, True, self.thunk_evals, self.thunk_hits, total_time_ms
     
     def _find_redex(self, term: Term) -> Optional[List[int]]:
         #Find leftmost-outermost redex in projected tree.#
@@ -777,7 +813,8 @@ class Config:
     max_depth: int = 8
     min_depth: int = 2
     max_size: int = 50
-    max_steps: int = 100
+    wall_clock_limit_ms: float = 100.0  # Primary limiter: wall clock time
+    max_steps: int = 10000  # Safety fallback
     share: bool = False
     libraries: Optional[List[str]] = None
     emit_next: bool = False
@@ -785,7 +822,7 @@ class Config:
     emit_trace: bool = False
     allow_divergent: bool = False
     seed: Optional[int] = None
-    
+
     def __post_init__(self):
         if self.libraries is None:
             self.libraries = []
@@ -815,12 +852,12 @@ def generate_example(config: Config, rng: random.Random, draw_index: int) -> Opt
     # Reduce based on strategy
     try:
         if config.strategy == 'levy_like' and config.share:
-            graph_reducer = GraphReducer(config.max_steps)
-            trace, diverged, thunk_evals, thunk_hits = graph_reducer.reduce(term)
+            graph_reducer = GraphReducer(config.wall_clock_limit_ms, config.max_steps)
+            trace, diverged, thunk_evals, thunk_hits, total_time_ms = graph_reducer.reduce(term)
         else:
             tree_reducer = TreeReducer(config.max_steps)
             trace, diverged = tree_reducer.reduce(term)
-            thunk_evals, thunk_hits = 0, 0
+            thunk_evals, thunk_hits, total_time_ms = 0, 0, 0.0
     except Exception as e:
         sys.stderr.write(f"\n[Error during reduction: {e}]\n")
         sys.stderr.flush()
@@ -839,11 +876,32 @@ def generate_example(config: Config, rng: random.Random, draw_index: int) -> Opt
     trace_id = str(uuid.uuid4())
 
     # Compute initial term size for growth tracking
-    initial_term, _ = trace[0]
+    # Handle both old format (term, path) and new format (term, path, step_ms)
+    if len(trace[0]) == 3:
+        initial_term, _, _ = trace[0]
+        has_timing = True
+    else:
+        initial_term, _ = trace[0]
+        has_timing = False
     initial_size = initial_term.size()
 
+    # Compute timing stats if available
+    if has_timing:
+        step_times = [step_ms for _, _, step_ms in trace]
+        avg_step_ms = sum(step_times) / len(step_times) if step_times else 0.0
+    else:
+        step_times = [0.0] * len(trace)
+        avg_step_ms = 0.0
+        total_time_ms = 0.0
+
+    steps_total = len(trace) - 1
+
     for step_k in range(len(trace)):
-        current_term, redex_path = trace[step_k]
+        if has_timing:
+            current_term, redex_path, step_ms = trace[step_k]
+        else:
+            current_term, redex_path = trace[step_k]
+            step_ms = 0.0
 
         if config.render == 'debruijn':
             result = Renderer.to_debruijn_with_spans(current_term)
@@ -854,18 +912,19 @@ def generate_example(config: Config, rng: random.Random, draw_index: int) -> Opt
         # Bug was: redex_path or [] converts None (NF) to [] (root), poisoning labels
         target_span = list(get_redex_span(current_term, redex_path, config.render))
 
-        # Fuel budget metrics for model awareness
-        steps_total = len(trace) - 1
-        fuel_remaining = max(0, config.max_steps - step_k)
-        fuel_consumed_ratio = step_k / config.max_steps if config.max_steps > 0 else 0.0
+        # Wall clock runtime metrics for model awareness
+        elapsed_time_ms = sum(step_times[:step_k+1])
+        time_remaining_ms = max(0.0, config.wall_clock_limit_ms - elapsed_time_ms)
+        time_consumed_ratio = elapsed_time_ms / config.wall_clock_limit_ms if config.wall_clock_limit_ms > 0 else 0.0
 
-        # Detect pathological cases
+        # Detect pathological cases based on runtime
         current_size = current_term.size()
         size_growth_rate = (current_size / initial_size) if initial_size > 0 else 1.0
         is_pathological = (
-            steps_total > config.max_steps * 0.8 or  # Used >80% of fuel
-            size_growth_rate > 3.0 or                 # Size tripled
-            current_size > 200                        # Very large term
+            time_consumed_ratio > 0.8 or     # Used >80% of wall clock budget
+            avg_step_ms > 5.0 or              # Slow steps (>5ms avg)
+            size_growth_rate > 3.0 or         # Size tripled
+            current_size > 200                # Very large term
         )
 
         example = {
@@ -888,10 +947,13 @@ def generate_example(config: Config, rng: random.Random, draw_index: int) -> Opt
                 'thunk_hits': thunk_hits,
                 'schema_version': SCHEMA_VERSION,
                 'term_hash': term_hash(result.string),
-                # Fuel budget metrics
-                'max_steps': config.max_steps,
-                'fuel_remaining': fuel_remaining,
-                'fuel_consumed_ratio': fuel_consumed_ratio,
+                # Runtime metrics (model is runtime-aware)
+                'step_ms': step_ms,
+                'avg_step_ms': avg_step_ms,
+                'total_time_ms': total_time_ms,
+                'wall_clock_limit_ms': config.wall_clock_limit_ms,
+                'time_remaining_ms': time_remaining_ms,
+                'time_consumed_ratio': time_consumed_ratio,
                 'is_pathological': is_pathological,
                 'size_growth_rate': size_growth_rate,
                 'initial_size': initial_size
@@ -899,7 +961,10 @@ def generate_example(config: Config, rng: random.Random, draw_index: int) -> Opt
         }
 
         if config.emit_next and step_k < len(trace) - 1:
-            next_term, _ = trace[step_k + 1]
+            if has_timing:
+                next_term, _, _ = trace[step_k + 1]
+            else:
+                next_term, _ = trace[step_k + 1]
             next_result = Renderer.to_debruijn_with_spans(next_term) if config.render == 'debruijn' else Renderer.to_named_with_spans(next_term)
             example['next_term'] = next_result.string
 
@@ -961,8 +1026,9 @@ class Metrics:
         self.recent_count = 0
         # Pathological case tracking
         self.pathological_count = 0
-        self.fuel_consumed_ratios = deque(maxlen=1000)
+        self.time_consumed_ratios = deque(maxlen=1000)
         self.size_growth_rates = deque(maxlen=1000)
+        self.step_times_ms = deque(maxlen=1000)
     
     def update(self, example: Dict[str, Any], latency: float):
         self.count += 1
@@ -976,11 +1042,12 @@ class Metrics:
         self.thunk_evals_total += example['meta'].get('thunk_evals', 0)
         self.thunk_hits_total += example['meta'].get('thunk_hits', 0)
         self.recent_count += 1
-        # Track pathological cases
+        # Track pathological cases and runtime metrics
         if example['meta'].get('is_pathological', False):
             self.pathological_count += 1
-        self.fuel_consumed_ratios.append(example['meta'].get('fuel_consumed_ratio', 0.0))
+        self.time_consumed_ratios.append(example['meta'].get('time_consumed_ratio', 0.0))
         self.size_growth_rates.append(example['meta'].get('size_growth_rate', 1.0))
+        self.step_times_ms.append(example['meta'].get('step_ms', 0.0))
     
     def percentile(self, values: List[float], p: float) -> float:
         if not values:
@@ -1003,10 +1070,11 @@ class Metrics:
         total_thunk_ops = self.thunk_evals_total + self.thunk_hits_total
         share_rate = self.thunk_hits_total / total_thunk_ops if total_thunk_ops > 0 else 0
 
-        # Compute pathological metrics
+        # Compute pathological and runtime metrics
         pathological_rate = self.pathological_count / self.count if self.count > 0 else 0
-        avg_fuel_ratio = sum(self.fuel_consumed_ratios) / len(self.fuel_consumed_ratios) if self.fuel_consumed_ratios else 0
+        avg_time_ratio = sum(self.time_consumed_ratios) / len(self.time_consumed_ratios) if self.time_consumed_ratios else 0
         avg_growth = sum(self.size_growth_rates) / len(self.size_growth_rates) if self.size_growth_rates else 1.0
+        avg_step_ms = sum(self.step_times_ms) / len(self.step_times_ms) if self.step_times_ms else 0
 
         return {
             'examples': self.count,
@@ -1023,10 +1091,11 @@ class Metrics:
             'thunk_evals': self.thunk_evals_total,
             'thunk_hits': self.thunk_hits_total,
             'share_hit_rate': round(share_rate, 3),
-            # Pathological case metrics
+            # Runtime awareness metrics
             'pathological_count': self.pathological_count,
             'pathological_rate': round(pathological_rate, 3),
-            'avg_fuel_consumed': round(avg_fuel_ratio, 3),
+            'avg_time_consumed': round(avg_time_ratio, 3),
+            'avg_step_ms': round(avg_step_ms, 2),
             'avg_size_growth': round(avg_growth, 2)
         }
     
@@ -1128,7 +1197,8 @@ def live_mode(args, config: Config):
                         f"share_rate={final_report['share_hit_rate']:.3f} | "
                         f"pathological={final_report['pathological_count']} "
                         f"({final_report['pathological_rate']:.1%}) | "
-                        f"avg_fuel={final_report['avg_fuel_consumed']:.1%} | "
+                        f"avg_time={final_report['avg_time_consumed']:.1%} | "
+                        f"avg_step={final_report['avg_step_ms']:.2f}ms | "
                         f"avg_growth={final_report['avg_size_growth']:.2f}x]\n")
 
 def test_mode(args, config: Config):
@@ -1568,7 +1638,10 @@ def parse_args():
     live.add_argument('--max-depth', type=int, default=8)
     live.add_argument('--min-depth', type=int, default=2)
     live.add_argument('--max-size', type=int, default=50)
-    live.add_argument('--max-steps', type=int, default=100)
+    live.add_argument('--wall-clock-limit-ms', type=float, default=100.0,
+                     help='Wall clock time limit per term in milliseconds (primary limiter)')
+    live.add_argument('--max-steps', type=int, default=10000,
+                     help='Maximum reduction steps (safety fallback)')
     live.add_argument('--max-terms', type=int)
     live.add_argument('--out', default='train.jsonl')
     live.add_argument('--seed', type=int)
@@ -1589,7 +1662,10 @@ def parse_args():
     test.add_argument('--render', default='debruijn', choices=['debruijn', 'named'])
     test.add_argument('--max-depth', type=int, default=8)
     test.add_argument('--min-depth', type=int, default=2)
-    test.add_argument('--max-steps', type=int, default=50)
+    test.add_argument('--wall-clock-limit-ms', type=float, default=100.0,
+                     help='Wall clock time limit per term in milliseconds')
+    test.add_argument('--max-steps', type=int, default=10000,
+                     help='Maximum reduction steps (safety fallback)')
     test.add_argument('--seed', type=int, default=1337)
     test.add_argument('--share', action='store_true')
     test.add_argument('--show-traces', action='store_true')
@@ -1616,6 +1692,8 @@ def main():
         config.min_depth = args.min_depth
     if hasattr(args, 'max_size'):
         config.max_size = args.max_size
+    if hasattr(args, 'wall_clock_limit_ms'):
+        config.wall_clock_limit_ms = args.wall_clock_limit_ms
     if hasattr(args, 'max_steps'):
         config.max_steps = args.max_steps
     if hasattr(args, 'seed'):
