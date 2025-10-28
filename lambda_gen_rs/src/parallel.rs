@@ -80,9 +80,15 @@ impl ParallelPipeline {
 
         // Spawn worker threads
         let chunk_size = 100; // Generate in chunks for better batching
-        let max_terms = self.config.max_terms.unwrap_or(usize::MAX);
-        let num_chunks = (max_terms + chunk_size - 1) / chunk_size; // Ceiling division
-        let num_chunks = num_chunks.min(10000);
+
+        // Avoid overflow when max_terms is unlimited
+        let num_chunks = if let Some(max) = self.config.max_terms {
+            // Ceiling division: (max + chunk_size - 1) / chunk_size
+            ((max + chunk_size - 1) / chunk_size).min(10000)
+        } else {
+            // Unlimited: use reasonable default for chunk distribution
+            10000
+        };
 
         let mut handles = Vec::new();
 
@@ -292,5 +298,38 @@ mod tests {
         // So we should get at least 10 examples, but likely more
         assert!(final_count >= 10);
         println!("Generated {} examples from 10 terms", final_count);
+    }
+
+    #[test]
+    fn test_unlimited_generation_no_overflow() {
+        // Regression test for overflow bug when max_terms is None
+        // Previously: (usize::MAX + chunk_size - 1) caused overflow
+        // Now: properly handles unlimited case
+        let config = PipelineConfig {
+            num_workers: 2,
+            max_terms: None,  // Unlimited - this used to overflow!
+            ..Default::default()
+        };
+
+        let pipeline = ParallelPipeline::new(config);
+        let count = Arc::new(AtomicUsize::new(0));
+        let count_clone = count.clone();
+        let stop_at = 20; // Generate a few to verify it works
+
+        pipeline.generate(move |_example| {
+            let c = count_clone.fetch_add(1, Ordering::Relaxed);
+            // Stop after generating some examples (to avoid infinite loop in test)
+            // In production, unlimited would run indefinitely
+            if c >= stop_at {
+                // Note: This doesn't actually stop the pipeline cleanly,
+                // but in practice the test will complete when workers finish chunks
+            }
+        });
+
+        let final_count = count.load(Ordering::Relaxed);
+        // With unlimited, we should have generated examples
+        // If overflow occurred, num_chunks would be 0 and we'd get 0 examples
+        assert!(final_count > 0, "Overflow bug: generated 0 examples with max_terms=None");
+        println!("Generated {} examples with unlimited mode", final_count);
     }
 }
