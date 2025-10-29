@@ -3,8 +3,6 @@
 //! This module defines the exact JSON schema matching the Python implementation,
 //! including ALL runtime awareness fields.
 
-use std::fmt;
-
 /// Complete training example with ALL metadata fields
 #[derive(Debug, Clone)]
 pub struct TrainingExample {

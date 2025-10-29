@@ -81,6 +81,35 @@ cd lambda_gen_rs
 cargo build --release
 ```
 
+**Windows Users:** Rust requires a linker on Windows. Choose one option:
+
+<details>
+<summary><b>Option 1: Visual Studio Build Tools (Recommended)</b></summary>
+
+1. Download [Visual Studio Build Tools 2022](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022)
+2. Run installer and select **"Desktop development with C++"**
+3. Install (about 6-7 GB)
+4. Restart terminal and run `cargo build --release`
+
+</details>
+
+<details>
+<summary><b>Option 2: GNU Toolchain (Faster Install)</b></summary>
+
+```powershell
+# Install GNU target
+rustup target add x86_64-pc-windows-gnu
+
+# Install MinGW-w64 (provides linker)
+winget install -e --id msys2.msys2
+# Or download from: https://www.mingw-w64.org/
+
+# Compile with GNU target
+cargo build --release --target x86_64-pc-windows-gnu
+```
+
+</details>
+
 ### Generate Training Data
 
 **Using Rust (Recommended for production):**
@@ -527,7 +556,31 @@ print(f'Load time: {time.time() - start:.2f}s for 1000 examples')
 
 ### Issue: Rust Compilation Fails
 
-**Symptoms:** Cargo build errors
+#### Windows: "linker `link.exe` not found"
+
+**Symptoms:**
+```
+error: linker `link.exe` not found
+note: the msvc targets depend on the msvc linker but `link.exe` was not found
+```
+
+**Cause:** Rust on Windows requires a linker (either MSVC or GNU)
+
+**Solutions:**
+
+**Option 1 - Install Visual Studio Build Tools (Recommended):**
+1. Download [Visual Studio Build Tools 2022](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022)
+2. Select "Desktop development with C++"
+3. Install and restart terminal
+
+**Option 2 - Use GNU Toolchain:**
+```powershell
+rustup target add x86_64-pc-windows-gnu
+winget install -e --id msys2.msys2
+cargo build --release --target x86_64-pc-windows-gnu
+```
+
+#### Other Issues
 
 **Solutions:**
 ```bash
