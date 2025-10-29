@@ -43,10 +43,10 @@ pub struct GeneratorConfig {
 impl Default for GeneratorConfig {
     fn default() -> Self {
         GeneratorConfig {
-            max_depth: 8,      // Reduced from 12: depth 8 = ~256 nodes worst case
+            max_depth: 8,      // Balanced depth for complex terms
             min_depth: 3,      // Avoid trivial terms
-            max_size: 100,     // Reduced from 200: allows 5x growth to ~500 nodes
-            allow_divergent: true,
+            max_size: 100,     // Initial size before reduction
+            allow_divergent: false,  // CRITICAL: Filter out non-normalizing terms
         }
     }
 }
