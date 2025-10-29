@@ -45,9 +45,9 @@ fn main() {
             let config = PipelineConfig {
                 num_workers,
                 generator_config: GeneratorConfig {
-                    max_depth: 6,
-                    min_depth: 2,
-                    max_size: 50,
+                    max_depth: 12,        // Increased from 6 for more complex terms
+                    min_depth: 3,         // Increased from 2 to avoid trivial terms
+                    max_size: 200,        // Increased from 50 for substantial terms
                     allow_divergent: true,
                 },
                 reduction_config: ReductionConfig {

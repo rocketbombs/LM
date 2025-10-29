@@ -72,7 +72,7 @@ fn render_term_impl(
 
 /// Find redex span from path and render result
 pub fn get_redex_span(
-    term: &Term,
+    _term: &Term,
     redex_path: Option<&[usize]>,
     render_result: &RenderResult,
 ) -> (usize, usize) {

@@ -6,7 +6,7 @@
 //! - Wall clock time limiting for predictable throughput
 //! - Per-step timing for runtime-aware training data
 
-use crate::term::{Term, TermArena, TermId, TermNode, TermType};
+use crate::term::Term;
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -46,6 +46,7 @@ pub struct ReductionTrace {
 
 /// Graph node for call-by-need reduction
 #[derive(Debug, Clone)]
+#[allow(dead_code)]  // Thunk and BlackHole reserved for future full memoization
 enum GraphNode {
     Var(u32),
     Abs(Box<GraphNode>),
@@ -57,6 +58,7 @@ enum GraphNode {
 /// Graph reducer with sharing and memoization
 pub struct GraphReducer {
     config: ReductionConfig,
+    #[allow(dead_code)]  // Reserved for future full memoization implementation
     thunk_cache: HashMap<u64, GraphNode>,
     thunk_evals: usize,
     thunk_hits: usize,
@@ -81,7 +83,7 @@ impl GraphReducer {
         // Convert to graph representation
         let mut graph = self.term_to_graph(term, &Vec::new());
 
-        for step_num in 0..self.config.max_steps {
+        for _step_num in 0..self.config.max_steps {
             let step_start = Instant::now();
 
             // Wall clock check BEFORE expensive operations

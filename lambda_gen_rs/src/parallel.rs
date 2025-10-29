@@ -13,7 +13,7 @@ use crate::schema::{ExampleMetadata, TrainingExample};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{sync_channel, SyncSender};
+use std::sync::mpsc::sync_channel;
 use std::sync::Arc;
 use std::thread;
 
