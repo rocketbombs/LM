@@ -153,17 +153,40 @@ impl ParallelPipeline {
                             continue;
                         }
 
+                        // Compute step times for averaging
+                        let step_times: Vec<f64> = trace.steps.iter().map(|s| s.step_time_ms).collect();
+                        let avg_step_ms = if !step_times.is_empty() {
+                            step_times.iter().sum::<f64>() / step_times.len() as f64
+                        } else {
+                            0.0
+                        };
+
+                        // Check if trace is pathological (skip entire trace if so)
+                        let initial_size = trace.steps[0].term.size();
+                        let final_size = trace.steps.last().map(|s| s.term.size()).unwrap_or(initial_size);
+                        let size_growth_rate = if initial_size > 0 {
+                            final_size as f64 / initial_size as f64
+                        } else {
+                            1.0
+                        };
+                        let time_consumed_ratio = trace.total_time_ms / config.reduction_config.wall_clock_limit_ms;
+
+                        let is_trace_pathological = ExampleMetadata::detect_pathological(
+                            time_consumed_ratio,
+                            avg_step_ms,
+                            size_growth_rate,
+                            final_size,
+                        );
+
+                        // VALIDATION: Skip pathological traces (extreme growth, very slow, etc.)
+                        if is_trace_pathological {
+                            // This trace exhibits pathological behavior
+                            // Skip to maintain clean training data
+                            continue;
+                        }
+
                         // Generate training examples from trace
                         let trace_id = format!("{:016x}-{:016x}", worker_seed, draw_index);
-                        let initial_size = trace.steps[0].term.size();
-
-                    // Compute step times for averaging
-                    let step_times: Vec<f64> = trace.steps.iter().map(|s| s.step_time_ms).collect();
-                    let avg_step_ms = if !step_times.is_empty() {
-                        step_times.iter().sum::<f64>() / step_times.len() as f64
-                    } else {
-                        0.0
-                    };
 
                     let steps_total = trace.steps.len().saturating_sub(1);
 
@@ -182,6 +205,18 @@ impl ParallelPipeline {
                             step.redex_path.as_deref(),
                             &render_result,
                         );
+
+                            // VALIDATION: Skip invalid examples with premature NF markers
+                            // target_span=(0,0) means "normal form reached", only valid on final step
+                            let is_final_step = step_k >= steps_total;
+                            let is_nf_marker = target_span == (0, 0);
+
+                            if is_nf_marker && !is_final_step {
+                                // This is INVALID: NF marker on non-final step
+                                // This indicates a bug in find_redex or malformed term
+                                // Skip this example to maintain data quality
+                                continue;
+                            }
 
                             // Compute runtime metrics
                             let elapsed_time_ms: f64 = step_times[..=step_k].iter().sum();
