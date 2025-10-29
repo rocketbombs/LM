@@ -185,10 +185,22 @@ impl ParallelPipeline {
                             continue;
                         }
 
+                        // VALIDATION: Skip trivial traces (already in NF or too short)
+                        let steps_total = trace.steps.len().saturating_sub(1);
+                        if steps_total == 0 {
+                            // Already in normal form - no reduction steps
+                            // Skip to ensure meaningful reduction examples
+                            continue;
+                        }
+
+                        if steps_total < 2 {
+                            // Only 1 reduction step - too trivial
+                            // Skip to ensure diverse, interesting patterns
+                            continue;
+                        }
+
                         // Generate training examples from trace
                         let trace_id = format!("{:016x}-{:016x}", worker_seed, draw_index);
-
-                    let steps_total = trace.steps.len().saturating_sub(1);
 
                         // Generate example for EACH step in trace
                         for (step_k, step) in trace.steps.iter().enumerate() {
