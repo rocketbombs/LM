@@ -20,8 +20,8 @@ pub struct ReductionConfig {
 impl Default for ReductionConfig {
     fn default() -> Self {
         ReductionConfig {
-            wall_clock_limit_ms: 100.0,
-            max_steps: 10000,
+            wall_clock_limit_ms: 250.0,  // Increased for complex terms
+            max_steps: 500,  // Reduced from 10000: normalizing terms should complete quickly
         }
     }
 }

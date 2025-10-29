@@ -47,12 +47,12 @@ fn main() {
                 generator_config: GeneratorConfig {
                     max_depth: 8,         // Balanced: allows complex terms without explosion
                     min_depth: 3,         // Avoid trivial terms
-                    max_size: 100,        // Allows 5x growth during reduction (~500 nodes)
-                    allow_divergent: true,
+                    max_size: 100,        // Initial size before reduction growth
+                    allow_divergent: false,  // CRITICAL: Filter out non-normalizing terms
                 },
                 reduction_config: ReductionConfig {
                     wall_clock_limit_ms: wall_clock_ms,
-                    max_steps: 10000,
+                    max_steps: 500,      // Normalizing terms complete in <500 steps
                 },
                 strategy: "levy_like".to_string(),
                 render: "debruijn".to_string(),
