@@ -119,10 +119,10 @@ impl ExampleMetadata {
         size_growth_rate: f64,
         current_size: usize,
     ) -> bool {
-        time_consumed_ratio > 0.8    // Used >80% of wall clock budget
-            || avg_step_ms > 5.0      // Slow steps (>5ms avg)
-            || size_growth_rate > 3.0 // Size tripled
-            || current_size > 200     // Very large term
+        time_consumed_ratio > 0.5    // Used >50% of wall clock budget (stricter)
+            || avg_step_ms > 3.0      // Slow steps (>3ms avg, stricter)
+            || size_growth_rate > 2.5 // Size more than doubled (stricter)
+            || current_size > 150     // Large term (stricter)
     }
 }
 

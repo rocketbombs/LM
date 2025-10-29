@@ -36,11 +36,24 @@ fn main() {
             let wall_clock_ms = if args.len() > 5 {
                 args[5].parse().expect("Invalid wall_clock_ms")
             } else {
-                100.0
+                250.0
             };
 
-            println!("Generating {} terms with {} workers...", num_terms, num_workers);
+            // Use time-based seed for maximum diversity (or user-provided)
+            let seed = if args.len() > 6 {
+                args[6].parse().expect("Invalid seed")
+            } else {
+                // Time-based seed for true randomness
+                use std::time::{SystemTime, UNIX_EPOCH};
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos() as u64
+            };
+
+            println!("Generating {} examples with {} workers...", num_terms, num_workers);
             println!("Wall clock limit: {}ms per term", wall_clock_ms);
+            println!("RNG seed: {} (time-based for diversity)", seed);
 
             let config = PipelineConfig {
                 num_workers,
