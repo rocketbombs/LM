@@ -123,8 +123,32 @@ impl ParallelPipeline {
                     // Per-worker reducer (no contention)
                     let mut reducer = GraphReducer::new(config.reduction_config.clone());
 
-                    // Per-worker generator
-                    let generator = TermGenerator::new(config.generator_config.clone());
+                    // DIVERSITY: Vary generation parameters per chunk for maximum variety
+                    // Cycle through different complexity levels to ensure broad coverage
+                    let complexity_cycle = (chunk_id % 5) as usize;
+                    let varied_config = GeneratorConfig {
+                        max_depth: match complexity_cycle {
+                            0 => 6,  // Simple terms
+                            1 => 7,  // Medium-simple
+                            2 => 8,  // Balanced (default)
+                            3 => 9,  // Medium-complex
+                            4 => 10, // Complex
+                            _ => 8,
+                        },
+                        max_size: match complexity_cycle {
+                            0 => 80,   // Smaller
+                            1 => 90,   // Medium-small
+                            2 => 100,  // Default
+                            3 => 110,  // Medium-large
+                            4 => 120,  // Larger
+                            _ => 100,
+                        },
+                        min_depth: config.generator_config.min_depth,
+                        allow_divergent: config.generator_config.allow_divergent,
+                    };
+
+                    // Per-worker generator with varied parameters
+                    let generator = TermGenerator::new(varied_config);
 
                     // Generate chunk of terms
                     for draw_index in 0..chunk_size {
