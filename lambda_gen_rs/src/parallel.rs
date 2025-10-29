@@ -183,6 +183,18 @@ impl ParallelPipeline {
                             &render_result,
                         );
 
+                            // VALIDATION: Skip invalid examples with premature NF markers
+                            // target_span=(0,0) means "normal form reached", only valid on final step
+                            let is_final_step = step_k >= steps_total;
+                            let is_nf_marker = target_span == (0, 0);
+
+                            if is_nf_marker && !is_final_step {
+                                // This is INVALID: NF marker on non-final step
+                                // This indicates a bug in find_redex or malformed term
+                                // Skip this example to maintain data quality
+                                continue;
+                            }
+
                             // Compute runtime metrics
                             let elapsed_time_ms: f64 = step_times[..=step_k].iter().sum();
                             let time_remaining_ms =
