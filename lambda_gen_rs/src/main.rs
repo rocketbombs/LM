@@ -45,9 +45,9 @@ fn main() {
             let config = PipelineConfig {
                 num_workers,
                 generator_config: GeneratorConfig {
-                    max_depth: 12,        // Increased from 6 for more complex terms
-                    min_depth: 3,         // Increased from 2 to avoid trivial terms
-                    max_size: 200,        // Increased from 50 for substantial terms
+                    max_depth: 8,         // Balanced: allows complex terms without explosion
+                    min_depth: 3,         // Avoid trivial terms
+                    max_size: 100,        // Allows 5x growth during reduction (~500 nodes)
                     allow_divergent: true,
                 },
                 reduction_config: ReductionConfig {
