@@ -128,34 +128,34 @@ impl ParallelPipeline {
 
                     // DIVERSITY: Vary generation parameters per chunk for maximum variety
                     // Cycle through different complexity levels to ensure broad coverage
-                    // ENHANCED: More variation cycles (0-9) for wider coverage
+                    // AGGRESSIVE: Push harder for large terms (cycles 0-9)
                     let complexity_cycle = (chunk_id % 10) as usize;
                     let varied_config = GeneratorConfig {
                         max_depth: match complexity_cycle {
-                            0 => 6,   // Simple terms
-                            1 => 7,   // Medium-simple
-                            2 => 8,   // Medium
-                            3 => 9,   // Medium-complex
-                            4 => 10,  // Complex
-                            5 => 11,  // Very complex
-                            6 => 12,  // Deep nesting (FIX: deep redex detection)
-                            7 => 13,  // Very deep
-                            8 => 14,  // Extreme depth
-                            9 => 15,  // Maximum depth (push the model!)
-                            _ => 10,
+                            0 => 8,   // Medium
+                            1 => 10,  // Complex
+                            2 => 12,  // Very complex
+                            3 => 13,  // Deep
+                            4 => 14,  // Very deep
+                            5 => 15,  // Extreme depth
+                            6 => 16,  // Ultra deep
+                            7 => 17,  // Maximum depth
+                            8 => 18,  // Beyond max (push limits!)
+                            9 => 20,  // Extreme (push model hard!)
+                            _ => 12,
                         },
                         max_size: match complexity_cycle {
-                            0 => 80,   // Smaller
-                            1 => 100,  // Medium
-                            2 => 120,  // Medium-large
-                            3 => 140,  // Large
-                            4 => 160,  // Very large
-                            5 => 180,  // Huge
-                            6 => 200,  // Very huge (growth examples)
-                            7 => 150,  // Back to medium-large
-                            8 => 130,  // Medium
-                            9 => 110,  // Medium (variety)
-                            _ => 120,
+                            0 => 120,  // Medium baseline
+                            1 => 150,  // Large
+                            2 => 180,  // Very large
+                            3 => 210,  // Huge
+                            4 => 240,  // Very huge (PUSH!)
+                            5 => 270,  // Extreme
+                            6 => 300,  // Ultra extreme (PUSH HARD!)
+                            7 => 250,  // Back to huge
+                            8 => 200,  // Large variety
+                            9 => 220,  // Very large variety
+                            _ => 180,
                         },
                         min_depth: config.generator_config.min_depth,
                         allow_divergent: config.generator_config.allow_divergent,

@@ -58,14 +58,14 @@ fn main() {
             let config = PipelineConfig {
                 num_workers,
                 generator_config: GeneratorConfig {
-                    max_depth: 12,        // INCREASED: Deep nesting for complex patterns
+                    max_depth: 15,        // INCREASED: Push deep nesting harder
                     min_depth: 3,         // Avoid trivial terms
-                    max_size: 150,        // INCREASED: Allow larger initial terms
+                    max_size: 250,        // INCREASED: Much larger to get 160-200 range
                     allow_divergent: false,  // CRITICAL: Filter out non-normalizing terms
                 },
                 reduction_config: ReductionConfig {
                     wall_clock_limit_ms: wall_clock_ms,
-                    max_steps: 500,      // Normalizing terms complete in <500 steps
+                    max_steps: 1000,     // INCREASED: Larger terms need more steps
                 },
                 strategy: "levy_like".to_string(),
                 render: "debruijn".to_string(),

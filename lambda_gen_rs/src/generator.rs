@@ -43,9 +43,9 @@ pub struct GeneratorConfig {
 impl Default for GeneratorConfig {
     fn default() -> Self {
         GeneratorConfig {
-            max_depth: 8,      // Balanced depth for complex terms
+            max_depth: 15,     // INCREASED: Deep nesting for complex patterns
             min_depth: 3,      // Avoid trivial terms
-            max_size: 100,     // Initial size before reduction
+            max_size: 250,     // INCREASED: Much larger terms to push the model
             allow_divergent: false,  // CRITICAL: Filter out non-normalizing terms
         }
     }
