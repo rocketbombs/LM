@@ -541,14 +541,14 @@ class PerformanceAnalyzer:
     def reduce_with_gold_detailed(self, term: Term,
                                   initial_chars: TermCharacteristics) -> DetailedReductionTrace:
         """Reduce with gold standard, collecting detailed metrics."""
-        trace, exceeded_max, _, _ = self.gold_reducer.reduce(term)
+        trace, exceeded_max, thunk_evals, thunk_hits, total_time_ms = self.gold_reducer.reduce(term)
 
         step_metrics: List[ReductionStepMetrics] = []
         total_tokens = 0
         size_evolution = []
         depth_evolution = []
 
-        for step_num, (term_obj, redex_path) in enumerate(trace):
+        for step_num, (term_obj, redex_path, step_time_ms) in enumerate(trace):
             chars = self.analyze_term_characteristics(term_obj)
             size_evolution.append(chars.size)
             depth_evolution.append(chars.depth)
