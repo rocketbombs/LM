@@ -117,11 +117,20 @@ impl ParallelPipeline {
                         }
                     }
 
-                    // Per-worker RNG (no contention)
+                    // Per-worker RNG with proper seed mixing
+                    // CRITICAL: Include both worker_id AND chunk_id for true uniqueness
+                    // Use SplitMix64-style mixing for good avalanche properties
                     let worker_seed = config.seed
-                        .wrapping_add(chunk_id as u64)
-                        .wrapping_mul(0x9e3779b97f4a7c15);
-                    let mut rng = SimpleRng::seed_from_u64(worker_seed);
+                        .wrapping_add((worker_id as u64).wrapping_mul(0x9e3779b97f4a7c15))
+                        .wrapping_add((chunk_id as u64).wrapping_mul(0x6a09e667f3bcc909))
+                        ^ ((chunk_id as u64) << 32);
+
+                    // Extra mixing step for better distribution
+                    let mixed_seed = worker_seed
+                        .wrapping_mul(0xbf58476d1ce4e5b9)
+                        ^ (worker_seed >> 32);
+
+                    let mut rng = SimpleRng::seed_from_u64(mixed_seed);
 
                     // Per-worker reducer (no contention)
                     let mut reducer = GraphReducer::new(config.reduction_config.clone());
