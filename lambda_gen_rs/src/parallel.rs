@@ -81,13 +81,16 @@ impl ParallelPipeline {
         // Spawn worker threads
         let chunk_size = 100; // Generate in chunks for better batching
 
-        // Avoid overflow when max_terms is unlimited
+        // Calculate number of chunks needed (removed artificial 10K cap!)
         let num_chunks = if let Some(max) = self.config.max_terms {
-            // Ceiling division: (max + chunk_size - 1) / chunk_size
-            ((max + chunk_size - 1) / chunk_size).min(10000)
+            // FIX: Scale chunks with target size, no artificial limit
+            // For 15M examples, we need ~150K chunks (at ~100 examples/chunk)
+            // Conservative estimate: 1 chunk generates ~10 examples on average
+            let estimated_chunks = (max / 10).max(1); // Rough estimate
+            estimated_chunks
         } else {
-            // Unlimited: use reasonable default for chunk distribution
-            10000
+            // Unlimited: use large but reasonable default
+            1_000_000 // 1M chunks for effectively unlimited generation
         };
 
         let mut handles = Vec::new();
@@ -125,23 +128,34 @@ impl ParallelPipeline {
 
                     // DIVERSITY: Vary generation parameters per chunk for maximum variety
                     // Cycle through different complexity levels to ensure broad coverage
-                    let complexity_cycle = (chunk_id % 5) as usize;
+                    // ENHANCED: More variation cycles (0-9) for wider coverage
+                    let complexity_cycle = (chunk_id % 10) as usize;
                     let varied_config = GeneratorConfig {
                         max_depth: match complexity_cycle {
-                            0 => 6,  // Simple terms
-                            1 => 7,  // Medium-simple
-                            2 => 8,  // Balanced (default)
-                            3 => 9,  // Medium-complex
-                            4 => 10, // Complex
-                            _ => 8,
+                            0 => 6,   // Simple terms
+                            1 => 7,   // Medium-simple
+                            2 => 8,   // Medium
+                            3 => 9,   // Medium-complex
+                            4 => 10,  // Complex
+                            5 => 11,  // Very complex
+                            6 => 12,  // Deep nesting (FIX: deep redex detection)
+                            7 => 13,  // Very deep
+                            8 => 14,  // Extreme depth
+                            9 => 15,  // Maximum depth (push the model!)
+                            _ => 10,
                         },
                         max_size: match complexity_cycle {
                             0 => 80,   // Smaller
-                            1 => 90,   // Medium-small
-                            2 => 100,  // Default
-                            3 => 110,  // Medium-large
-                            4 => 120,  // Larger
-                            _ => 100,
+                            1 => 100,  // Medium
+                            2 => 120,  // Medium-large
+                            3 => 140,  // Large
+                            4 => 160,  // Very large
+                            5 => 180,  // Huge
+                            6 => 200,  // Very huge (growth examples)
+                            7 => 150,  // Back to medium-large
+                            8 => 130,  // Medium
+                            9 => 110,  // Medium (variety)
+                            _ => 120,
                         },
                         min_depth: config.generator_config.min_depth,
                         allow_divergent: config.generator_config.allow_divergent,

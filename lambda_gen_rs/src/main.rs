@@ -58,9 +58,9 @@ fn main() {
             let config = PipelineConfig {
                 num_workers,
                 generator_config: GeneratorConfig {
-                    max_depth: 8,         // Balanced: allows complex terms without explosion
+                    max_depth: 12,        // INCREASED: Deep nesting for complex patterns
                     min_depth: 3,         // Avoid trivial terms
-                    max_size: 100,        // Initial size before reduction growth
+                    max_size: 150,        // INCREASED: Allow larger initial terms
                     allow_divergent: false,  // CRITICAL: Filter out non-normalizing terms
                 },
                 reduction_config: ReductionConfig {
@@ -69,7 +69,7 @@ fn main() {
                 },
                 strategy: "levy_like".to_string(),
                 render: "debruijn".to_string(),
-                seed: 42,
+                seed,  // FIX: Use computed seed instead of hardcoded 42
                 max_terms: Some(num_terms),
             };
 
