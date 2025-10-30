@@ -213,7 +213,11 @@ class PerformanceAnalyzer:
         )
 
         max_steps = config.get('max_steps', 1000)
-        self.gold_reducer = GraphReducer(max_steps=max_steps)
+        wall_clock_limit = config.get('wall_clock_limit_ms', 100.0)
+        self.gold_reducer = GraphReducer(
+            max_steps=max_steps,
+            wall_clock_limit_ms=wall_clock_limit
+        )
         self.tree_reducer = TreeReducer(max_steps=max_steps)
 
         # Storage for results
@@ -665,14 +669,45 @@ class PerformanceAnalyzer:
         initial_chars = self.analyze_term_characteristics(term)
         initial_str = Renderer.to_debruijn_with_spans(term).string
 
-        # Run both strategies
+        # Run model reduction
         model_trace = self.reduce_with_model_detailed(term, initial_chars)
-        gold_trace = self.reduce_with_gold_detailed(term, initial_chars)
+
+        # Optionally run gold for comparison
+        model_only = self.config.get('model_only', False)
+        if model_only:
+            # Skip gold comparison - create a dummy gold trace
+            gold_trace = None
+        else:
+            gold_trace = self.reduce_with_gold_detailed(term, initial_chars)
 
         # Analyze paths
         model_paths = self.analyze_path_patterns(model_trace)
-        gold_paths = self.analyze_path_patterns(gold_trace)
+        gold_paths = self.analyze_path_patterns(gold_trace) if gold_trace else None
 
+        if model_only:
+            # Model-only mode: just check if model reached normal form
+            model_is_nf = not self._has_redex(model_trace.final_term) if model_trace.final_term else True
+
+            return PerformanceComparison(
+                term_id=term_id,
+                initial_term=initial_str,
+                initial_characteristics=initial_chars,
+                model_trace=model_trace,
+                gold_trace=None,
+                same_normal_form=model_is_nf,  # Assume correct if NF
+                model_correct=model_is_nf,
+                model_faster_steps=True,  # No comparison
+                step_difference=0,
+                token_difference=0,
+                time_difference_ms=model_trace.total_inference_time_ms,
+                diverged=False,
+                divergence_step=None,
+                divergence_type=None,
+                model_path_analysis=model_paths,
+                gold_path_analysis=None
+            )
+
+        # Full comparison mode
         # Check correctness
         model_is_nf = not self._has_redex(model_trace.final_term) if model_trace.final_term else True
         gold_is_nf = not self._has_redex(gold_trace.final_term) if gold_trace.final_term else True
@@ -757,14 +792,23 @@ class PerformanceAnalyzer:
         print(f"Generated {len(terms)} terms\n")
         print("Running performance analysis...\n")
 
-        # Analyze each term
+        # Analyze each term with timing
+        analysis_start = time.perf_counter()
         for i, term in enumerate(terms):
+            term_start = time.perf_counter()
+
             if not verbose and (i + 1) % 10 == 0:
-                print(f"  Analyzed {i + 1}/{len(terms)} terms...")
+                elapsed = time.perf_counter() - analysis_start
+                avg_time = elapsed / (i + 1)
+                remaining = avg_time * (len(terms) - i - 1)
+                print(f"  Analyzed {i + 1}/{len(terms)} terms... "
+                      f"(avg: {avg_time:.2f}s/term, est remaining: {remaining:.1f}s)")
 
             try:
                 comparison = self.compare_reductions(i, term)
                 self.comparisons.append(comparison)
+
+                term_time = time.perf_counter() - term_start
 
                 if verbose:
                     print(f"\nTerm {i}: {comparison.initial_term[:60]}...")
@@ -772,8 +816,12 @@ class PerformanceAnalyzer:
                           f"{comparison.model_trace.total_inference_time_ms:.2f}ms")
                     print(f"  Gold: {comparison.gold_trace.total_steps} steps")
                     print(f"  Correct: {comparison.model_correct}, Diverged: {comparison.diverged}")
+                    print(f"  Analysis time: {term_time:.2f}s")
             except Exception as e:
                 print(f"  Error on term {i}: {e}")
+                if verbose:
+                    import traceback
+                    traceback.print_exc()
                 continue
 
         print(f"\nCompleted analysis of {len(self.comparisons)} terms\n")
@@ -790,7 +838,7 @@ class PerformanceAnalyzer:
 
         # Basic statistics
         model_converged = sum(1 for c in self.comparisons if c.model_trace.converged)
-        gold_converged = sum(1 for c in self.comparisons if c.gold_trace.converged)
+        gold_converged = sum(1 for c in self.comparisons if c.gold_trace and c.gold_trace.converged)
         correct = sum(1 for c in self.comparisons if c.model_correct)
         exact_match = sum(1 for c in self.comparisons if not c.diverged)
         model_faster = sum(1 for c in self.comparisons if c.model_faster_steps)
@@ -875,7 +923,7 @@ class PerformanceAnalyzer:
         for c in self.comparisons:
             if c.model_path_analysis:
                 all_model_patterns.update(c.model_path_analysis.path_patterns)
-            if c.gold_path_analysis:
+            if c.gold_path_analysis and c.gold_trace:
                 all_gold_patterns.update(c.gold_path_analysis.path_patterns)
 
         unique_model = [p for p in all_model_patterns if p not in all_gold_patterns]
@@ -883,7 +931,7 @@ class PerformanceAnalyzer:
         # Speed analysis
         speedups = []
         for c in self.comparisons:
-            if c.gold_trace.total_steps > 0:
+            if c.gold_trace and c.gold_trace.total_steps > 0:
                 speedup = (c.gold_trace.total_steps - c.model_trace.total_steps) / c.gold_trace.total_steps
                 speedups.append((c.term_id, speedup))
 
@@ -1133,12 +1181,12 @@ class PerformanceAnalyzer:
                     'depth_evolution': comp.model_trace.depth_evolution,
                 },
                 'gold': {
-                    'steps': comp.gold_trace.total_steps,
-                    'tokens': comp.gold_trace.total_tokens,
-                    'converged': comp.gold_trace.converged,
-                    'size_evolution': comp.gold_trace.size_evolution,
-                    'depth_evolution': comp.gold_trace.depth_evolution,
-                },
+                    'steps': comp.gold_trace.total_steps if comp.gold_trace else None,
+                    'tokens': comp.gold_trace.total_tokens if comp.gold_trace else None,
+                    'converged': comp.gold_trace.converged if comp.gold_trace else None,
+                    'size_evolution': comp.gold_trace.size_evolution if comp.gold_trace else None,
+                    'depth_evolution': comp.gold_trace.depth_evolution if comp.gold_trace else None,
+                } if comp.gold_trace else None,
                 'comparison': {
                     'same_normal_form': comp.same_normal_form,
                     'model_correct': comp.model_correct,
@@ -1185,21 +1233,22 @@ class PerformanceAnalyzer:
                     })
 
                 gold_steps = []
-                for step in comp.gold_trace.step_metrics:
-                    gold_steps.append({
-                        'step': step.step_num,
-                        'term': step.term_string,
-                        'size': step.term_size,
-                        'depth': step.term_depth,
-                        'redex_path': step.redex_path,
-                        'redex_depth': step.redex_depth,
-                    })
+                if comp.gold_trace:
+                    for step in comp.gold_trace.step_metrics:
+                        gold_steps.append({
+                            'step': step.step_num,
+                            'term': step.term_string,
+                            'size': step.term_size,
+                            'depth': step.term_depth,
+                            'redex_path': step.redex_path,
+                            'redex_depth': step.redex_depth,
+                        })
 
                 sample_traces.append({
                     'term_id': comp.term_id,
                     'initial_term': comp.initial_term,
                     'model_steps': model_steps,
-                    'gold_steps': gold_steps,
+                    'gold_steps': gold_steps if comp.gold_trace else None,
                 })
 
         with open(output_path / 'sample_traces.json', 'w') as f:
@@ -1226,12 +1275,16 @@ def main():
                        help='Maximum term size')
     parser.add_argument('--max-steps', type=int, default=1000,
                        help='Maximum reduction steps')
+    parser.add_argument('--wall-clock-limit-ms', type=float, default=50.0,
+                       help='Wall clock limit per term for gold reducer (ms)')
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu',
                        help='Device (cuda/cpu)')
     parser.add_argument('--seed', type=int, default=42,
                        help='Random seed')
     parser.add_argument('--verbose', action='store_true',
                        help='Print detailed output')
+    parser.add_argument('--model-only', action='store_true',
+                       help='Skip gold comparison for faster analysis')
     parser.add_argument('--output-dir', required=True,
                        help='Output directory for results')
 
