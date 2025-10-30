@@ -276,7 +276,15 @@ impl ParallelPipeline {
                                 current_size,
                             );
 
+                            // VALIDATION: Skip pathological examples (individual steps)
+                            // Even if the overall trace isn't pathological, individual steps can become
+                            // pathological as the term grows or slows down during reduction
+                            if is_pathological {
+                                continue;
+                            }
+
                             // Create complete metadata
+                            // Note: is_pathological is always false here because we filter them out
                             let meta = ExampleMetadata::new(
                                 current_size,
                                 step.term.depth(),
@@ -292,7 +300,7 @@ impl ParallelPipeline {
                                 config.reduction_config.wall_clock_limit_ms,
                                 time_remaining_ms,
                                 time_consumed_ratio,
-                                is_pathological,
+                                false, // Always false - pathological examples are filtered out
                                 size_growth_rate,
                                 initial_size,
                             );
