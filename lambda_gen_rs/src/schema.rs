@@ -119,10 +119,10 @@ impl ExampleMetadata {
         size_growth_rate: f64,
         current_size: usize,
     ) -> bool {
-        time_consumed_ratio > 0.5    // Used >50% of wall clock budget (stricter)
-            || avg_step_ms > 3.0      // Slow steps (>3ms avg, stricter)
-            || size_growth_rate > 2.5 // Size more than doubled (stricter)
-            || current_size > 150     // Large term (stricter)
+        time_consumed_ratio > 0.8    // Used >80% of wall clock budget (more permissive)
+            || avg_step_ms > 5.0      // Slow steps (>5ms avg, more permissive)
+            || size_growth_rate > 3.5 // Size more than tripled (more permissive for growth examples)
+            || current_size > 250     // INCREASED: Allow terms up to 250 nodes (was 150)
     }
 }
 
@@ -206,20 +206,23 @@ mod tests {
 
     #[test]
     fn test_pathological_detection() {
-        // Should detect high time consumption
+        // Should detect high time consumption (>80%)
         assert!(ExampleMetadata::detect_pathological(0.85, 1.0, 1.0, 50));
 
-        // Should detect slow steps
+        // Should detect slow steps (>5ms avg)
         assert!(ExampleMetadata::detect_pathological(0.5, 6.0, 1.0, 50));
 
-        // Should detect size explosion
+        // Should detect size explosion (>3.5x growth)
         assert!(ExampleMetadata::detect_pathological(0.5, 1.0, 4.0, 50));
 
-        // Should detect large terms
-        assert!(ExampleMetadata::detect_pathological(0.5, 1.0, 1.0, 250));
+        // Should detect very large terms (>250 nodes)
+        assert!(ExampleMetadata::detect_pathological(0.5, 1.0, 1.0, 260));
 
         // Should NOT detect normal cases
         assert!(!ExampleMetadata::detect_pathological(0.3, 1.0, 1.2, 30));
+
+        // Should NOT detect large but acceptable terms (150-250 nodes)
+        assert!(!ExampleMetadata::detect_pathological(0.5, 2.0, 1.5, 200));
     }
 
     #[test]
