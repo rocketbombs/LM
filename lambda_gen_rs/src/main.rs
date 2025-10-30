@@ -39,21 +39,68 @@ fn main() {
                 250.0
             };
 
-            // Use time-based seed for maximum diversity (or user-provided)
+            // Use entropy-rich seed for maximum diversity (or user-provided)
             let seed = if args.len() > 6 {
                 args[6].parse().expect("Invalid seed")
             } else {
-                // Time-based seed for true randomness
+                // Multi-source entropy mixing for TRUE randomness
                 use std::time::{SystemTime, UNIX_EPOCH};
-                SystemTime::now()
+                use std::hash::{Hash, Hasher};
+                use std::collections::hash_map::DefaultHasher;
+
+                // Source 1: High-resolution timestamp (nanoseconds)
+                let time_nanos = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
-                    .as_nanos() as u64
+                    .as_nanos() as u64;
+
+                // Source 2: Process ID for uniqueness across runs
+                let pid = std::process::id() as u64;
+
+                // Source 3: Hash of command-line args for variation
+                let mut hasher = DefaultHasher::new();
+                for arg in &args {
+                    arg.hash(&mut hasher);
+                }
+                let args_hash = hasher.finish();
+
+                // Source 4: Memory address entropy (stack location varies)
+                let stack_addr = &time_nanos as *const _ as u64;
+
+                // Source 5: Thread ID entropy
+                let thread_id = {
+                    let mut hasher = DefaultHasher::new();
+                    std::thread::current().id().hash(&mut hasher);
+                    hasher.finish()
+                };
+
+                // Mix all entropy sources with strong avalanche
+                let entropy1 = time_nanos
+                    .wrapping_mul(0x9e3779b97f4a7c15)  // Golden ratio
+                    ^ pid.wrapping_mul(0x6a09e667f3bcc909);  // sqrt(2)
+
+                let entropy2 = args_hash
+                    .wrapping_mul(0xbf58476d1ce4e5b9)  // Large prime
+                    ^ stack_addr.rotate_left(32);
+
+                let entropy3 = thread_id
+                    .wrapping_mul(0x94d049bb133111eb)  // PCG constant
+                    ^ (time_nanos >> 32);
+
+                // Final mixing with SplitMix64-style avalanche
+                let mut mixed = entropy1 ^ entropy2 ^ entropy3;
+                mixed ^= mixed >> 30;
+                mixed = mixed.wrapping_mul(0xbf58476d1ce4e5b9);
+                mixed ^= mixed >> 27;
+                mixed = mixed.wrapping_mul(0x94d049bb133111eb);
+                mixed ^= mixed >> 31;
+
+                mixed
             };
 
             println!("Generating {} examples with {} workers...", num_terms, num_workers);
             println!("Wall clock limit: {}ms per term", wall_clock_ms);
-            println!("RNG seed: {} (time-based for diversity)", seed);
+            println!("RNG seed: {} (multi-source entropy for TRUE diversity)", seed);
 
             let config = PipelineConfig {
                 num_workers,

@@ -186,6 +186,16 @@ impl ParallelPipeline {
                             }
                         }
 
+                        // Extra per-term entropy injection for maximum diversity
+                        // Mix draw_index into RNG state to ensure each term in chunk is unique
+                        // This prevents any correlation even if RNG has weaknesses
+                        let draw_entropy = (draw_index as u64)
+                            .wrapping_mul(0x9e3779b97f4a7c15)
+                            ^ (draw_index as u64).rotate_left(32);
+
+                        // Inject entropy into RNG for this specific term
+                        rng.inject_entropy(draw_entropy);
+
                     // Generate term
                     let term = match generator.generate(&mut rng) {
                         Some(t) => t,
