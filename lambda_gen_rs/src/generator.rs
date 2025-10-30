@@ -7,7 +7,7 @@ use crate::term::Term;
 
 /// Simple, fast random number generator (LCG)
 pub struct SimpleRng {
-    state: u64,
+    pub state: u64,  // Public for entropy injection
 }
 
 impl SimpleRng {
@@ -29,6 +29,13 @@ impl SimpleRng {
         }
         let range = max - min;
         min + (self.next_u64() % range as u64) as u32
+    }
+
+    /// Inject entropy into RNG state for extra diversity
+    pub fn inject_entropy(&mut self, entropy: u64) {
+        self.state ^= entropy;
+        // Warm up after injection
+        self.next_u64();
     }
 }
 
