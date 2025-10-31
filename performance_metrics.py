@@ -126,8 +126,8 @@ class AggregatedMetrics:
     gold_convergence_rate: float
 
     # Correctness
-    correctness_rate: float  # % terms reaching correct NF
-    exact_match_rate: float  # % terms following exact same path as gold
+    accuracy: float  # % terms reaching correct NF
+    same_path_rate: float  # % terms following exact same path as gold
 
     # Efficiency
     model_faster_rate: float  # % terms where model is faster
@@ -814,7 +814,8 @@ class PerformanceAnalyzer:
                     print(f"\nTerm {i}: {comparison.initial_term[:60]}...")
                     print(f"  Model: {comparison.model_trace.total_steps} steps, "
                           f"{comparison.model_trace.total_inference_time_ms:.2f}ms")
-                    print(f"  Gold: {comparison.gold_trace.total_steps} steps")
+                    if comparison.gold_trace:
+                        print(f"  Gold: {comparison.gold_trace.total_steps} steps")
                     print(f"  Correct: {comparison.model_correct}, Diverged: {comparison.diverged}")
                     print(f"  Analysis time: {term_time:.2f}s")
             except Exception as e:
@@ -992,8 +993,8 @@ class PerformanceAnalyzer:
             successful_terms=model_converged,
             model_convergence_rate=model_converged / total,
             gold_convergence_rate=gold_converged / total,
-            correctness_rate=correct / total,
-            exact_match_rate=exact_match / total,
+            accuracy=correct / total,
+            same_path_rate=exact_match / total,
             model_faster_rate=model_faster / total,
             avg_step_difference=avg_step_diff,
             avg_token_difference=avg_token_diff,
@@ -1025,8 +1026,8 @@ class PerformanceAnalyzer:
         print(f"{'-'*80}")
         print(f"Total terms analyzed: {metrics.total_terms}")
         print(f"Successful reductions: {metrics.successful_terms} ({100*metrics.model_convergence_rate:.1f}%)")
-        print(f"Correctness rate: {100*metrics.correctness_rate:.1f}%")
-        print(f"Exact match rate: {100*metrics.exact_match_rate:.1f}%")
+        print(f"Accuracy (correct NF): {100*metrics.accuracy:.1f}%")
+        print(f"Same path rate: {100*metrics.same_path_rate:.1f}%")
         print(f"Model faster rate: {100*metrics.model_faster_rate:.1f}%")
         print(f"Average step difference: {metrics.avg_step_difference:+.2f}")
         print(f"Average inference time: {metrics.avg_time_per_inference_ms:.2f}ms")
@@ -1130,8 +1131,8 @@ class PerformanceAnalyzer:
             'overall': {
                 'total_terms': metrics.total_terms,
                 'successful_terms': metrics.successful_terms,
-                'correctness_rate': metrics.correctness_rate,
-                'exact_match_rate': metrics.exact_match_rate,
+                'accuracy': metrics.accuracy,
+                'same_path_rate': metrics.same_path_rate,
                 'model_faster_rate': metrics.model_faster_rate,
                 'avg_step_difference': metrics.avg_step_difference,
                 'avg_token_difference': metrics.avg_token_difference,
