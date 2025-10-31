@@ -881,15 +881,23 @@ def compute_span_loss(start_logits: torch.Tensor, end_logits: torch.Tensor,
 
 def compute_soft_iou_loss(start_logits: torch.Tensor, end_logits: torch.Tensor,
                           start_labels: torch.Tensor, end_labels: torch.Tensor,
+                          attention_mask: torch.Tensor, is_nf: torch.Tensor,
                           window: int = 2) -> torch.Tensor:
     #
     #Compute soft IoU loss by creating triangular distributions around gold spans.
     #
     #This encourages the model to predict spans that overlap with the gold span,
     #providing a softer training signal than hard token-level CE.
+    #Only computed on valid (non-padding) tokens and excludes normal form examples.
     #
     B, L = start_logits.shape
     device = start_logits.device
+
+    # Create loss weights: zero out NF examples
+    loss_weight = (1.0 - is_nf)  # (B,)
+    num_reducible = loss_weight.sum()
+    if num_reducible < 0.5:  # No reducible examples in batch
+        return (start_logits * 0.0).mean()  # Return zero loss in computation graph
 
     # Create soft targets: triangular distribution centered on gold
     def make_soft_target(labels: torch.Tensor) -> torch.Tensor:
@@ -905,17 +913,24 @@ def compute_soft_iou_loss(start_logits: torch.Tensor, end_logits: torch.Tensor,
                     weight = 1.0 - abs(offset) / (window + 1)
                     soft[i, idx] = weight
 
+            # Zero out padding positions
+            soft[i] = soft[i] * attention_mask[i].float()
+
             # Normalize (ensure we have valid weights to normalize)
             total = soft[i].sum()
             if total > 1e-6:
                 soft[i] = soft[i] / total
             else:
-                # Fallback: put all mass on clamped center position
-                if 0 <= center < L:
+                # Fallback: put all mass on clamped center position if valid
+                if 0 <= center < L and attention_mask[i, center]:
                     soft[i, center] = 1.0
                 else:
-                    # Last resort: uniform distribution if center is invalid
-                    soft[i, :] = 1.0 / L
+                    # Last resort: uniform over valid positions
+                    valid_count = attention_mask[i].sum().item()
+                    if valid_count > 0:
+                        soft[i] = attention_mask[i].float() / valid_count
+                    else:
+                        soft[i, :] = 1.0 / L
         return soft
 
     start_soft = make_soft_target(start_labels)
@@ -926,8 +941,13 @@ def compute_soft_iou_loss(start_logits: torch.Tensor, end_logits: torch.Tensor,
     start_log_probs = F.log_softmax(start_logits, dim=-1)
     end_log_probs = F.log_softmax(end_logits, dim=-1)
 
-    start_iou_loss = F.kl_div(start_log_probs, start_soft, reduction='batchmean')
-    end_iou_loss = F.kl_div(end_log_probs, end_soft, reduction='batchmean')
+    # Compute per-sample loss
+    start_iou_loss_per_sample = F.kl_div(start_log_probs, start_soft, reduction='none').sum(dim=-1)
+    end_iou_loss_per_sample = F.kl_div(end_log_probs, end_soft, reduction='none').sum(dim=-1)
+
+    # Apply NF masking
+    start_iou_loss = (start_iou_loss_per_sample * loss_weight).sum() / num_reducible
+    end_iou_loss = (end_iou_loss_per_sample * loss_weight).sum() / num_reducible
 
     return (start_iou_loss + end_iou_loss) / 2
 
@@ -952,10 +972,11 @@ def compute_total_loss(outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.
         config.label_smoothing
     )
     
-    # Soft IoU loss
+    # Soft IoU loss (masked for NF examples and padding)
     iou_loss = compute_soft_iou_loss(
         outputs['start_logits'], outputs['end_logits'],
         batch['start_labels'], batch['end_labels'],
+        batch['attention_mask'], batch['is_nf'],
         config.iou_window
     )
     
@@ -988,22 +1009,36 @@ def compute_span_metrics(outputs: Dict[str, torch.Tensor],
                         batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
     #
     #Compute span prediction metrics: exact match, token F1, span IoU.
+    #Metrics are computed only on valid (non-padding) examples, and for span
+    #predictions, only on reducible (non-NF) examples.
     #
     start_preds = outputs['start_logits'].argmax(dim=-1)
     end_preds = outputs['end_logits'].argmax(dim=-1)
 
     start_labels = batch['start_labels']
     end_labels = batch['end_labels']
+    is_nf = batch['is_nf']
 
-    # Exact match: both start and end correct
-    exact_match = ((start_preds == start_labels) & (end_preds == end_labels)).float().mean()
+    # Create mask for reducible examples (not normal forms)
+    is_reducible = (is_nf < 0.5)  # (B,) boolean mask
+    num_reducible = is_reducible.sum().item()
 
-    # Token-level F1
-    start_correct = (start_preds == start_labels).float().mean()
-    end_correct = (end_preds == end_labels).float().mean()
-    token_f1 = (start_correct + end_correct) / 2
+    # Exact match: both start and end correct (only for reducible examples)
+    if num_reducible > 0:
+        exact_match_per_sample = ((start_preds == start_labels) & (end_preds == end_labels)).float()
+        exact_match = (exact_match_per_sample * is_reducible.float()).sum() / num_reducible
 
-    # Span IoU
+        # Token-level accuracy (only for reducible examples)
+        start_correct_per_sample = (start_preds == start_labels).float()
+        end_correct_per_sample = (end_preds == end_labels).float()
+        start_correct = (start_correct_per_sample * is_reducible.float()).sum() / num_reducible
+        end_correct = (end_correct_per_sample * is_reducible.float()).sum() / num_reducible
+        token_f1 = (start_correct + end_correct) / 2
+    else:
+        exact_match = torch.tensor(0.0)
+        token_f1 = torch.tensor(0.0)
+
+    # Span IoU (only for reducible examples)
     def span_iou(pred_start, pred_end, gold_start, gold_end):
         #Compute IoU for single span pair.#
         intersection_start = max(pred_start, gold_start)
@@ -1018,15 +1053,16 @@ def compute_span_metrics(outputs: Dict[str, torch.Tensor],
 
     ious = []
     for i in range(len(start_preds)):
-        iou = span_iou(
-            start_preds[i].item(), end_preds[i].item(),
-            start_labels[i].item(), end_labels[i].item()
-        )
-        ious.append(iou)
+        if is_reducible[i]:  # Only compute IoU for reducible examples
+            iou = span_iou(
+                start_preds[i].item(), end_preds[i].item(),
+                start_labels[i].item(), end_labels[i].item()
+            )
+            ious.append(iou)
 
     mean_iou = sum(ious) / len(ious) if ious else 0.0
 
-    # NF accuracy
+    # NF accuracy (computed on all examples)
     nf_preds = (outputs['nf_logits'] > 0).float()
     nf_acc = (nf_preds == batch['is_nf']).float().mean()
 
@@ -1419,13 +1455,6 @@ class Trainer:
                 self.writer.add_scalar(f'train/{k}', v, self.step)
             self.writer.add_scalar('train/lr', self.scheduler.get_last_lr()[0], self.step)
             self.writer.add_scalar('train/tokens_per_sec', tokens_per_sec, self.step)
-            # Log fuel budget metrics if available
-            if 'pathological_ratio' in avg_metrics:
-                self.writer.add_scalar('train/pathological_ratio', avg_metrics['pathological_ratio'], self.step)
-            if 'avg_fuel_consumed' in avg_metrics:
-                self.writer.add_scalar('train/avg_fuel_consumed', avg_metrics['avg_fuel_consumed'], self.step)
-            if 'avg_growth' in avg_metrics:
-                self.writer.add_scalar('train/avg_size_growth', avg_metrics['avg_growth'], self.step)
     
     def _log_validation(self, val_loss: float):
         #Log validation metrics.#
