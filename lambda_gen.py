@@ -720,6 +720,11 @@ class GraphReducer:
         #  thunk_hits: int - sharing metric
         #  total_time_ms: float - total wall clock time
         #
+        # Clear cache and reset counters for this reduction
+        self.thunk_cache.clear()
+        self.thunk_evals = 0
+        self.thunk_hits = 0
+
         graph = self.term_to_graph(term)
         trace = []
 

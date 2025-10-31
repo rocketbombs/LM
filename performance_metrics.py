@@ -92,7 +92,7 @@ class PerformanceComparison:
 
     # Traces
     model_trace: DetailedReductionTrace
-    gold_trace: DetailedReductionTrace
+    gold_trace: Optional[DetailedReductionTrace]
 
     # Correctness
     same_normal_form: bool
