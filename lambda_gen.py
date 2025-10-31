@@ -129,30 +129,39 @@ class GraphNode:
     evaluated: bool = field(default=False)
     cache: Optional['GraphNode'] = field(default=None)
     
-    def to_tree(self, visited: Optional[set] = None) -> Term:
-        #Project graph node back to tree term for rendering with cycle detection.
+    def to_tree(self, visited: Optional[set] = None, cache: Optional[Dict[int, Term]] = None) -> Term:
+        #Project graph node back to tree term for rendering with cycle detection and memoization.
 
-        #Note: VAR nodes with THUNK bindings project the variable reference itself
-        #to avoid premature expansion in trace views. The redex selection logic
-        #operates on the projected tree, so this preserves correctness.
+        #Uses two-level approach:
+        #- visited: cycle detection (nodes currently on the call stack)
+        #- cache: memoization (nodes already fully processed)
+        #
+        #This prevents exponential blowup on shared structures while still catching cycles.
         #
         if visited is None:
             visited = set()
+            cache = {}
 
         node_id = id(self)
+
+        # Check memoization cache first
+        if cache is not None and node_id in cache:
+            return cache[node_id]
+
+        # Check for cycles
         if node_id in visited:
             # Cycle detected - return a safe placeholder
             return Term(TermType.VAR, var=0)
         visited.add(node_id)
 
         if self.kind == NodeKind.VALUE:
-            result = self.cache.to_tree(visited) if self.cache else Term(TermType.VAR, var=0)
+            result = self.cache.to_tree(visited, cache) if self.cache else Term(TermType.VAR, var=0)
         elif self.kind == NodeKind.THUNK:
             # Check external cache status via node fields (kept for backward compat)
             if self.evaluated and self.cache:
-                result = self.cache.to_tree(visited)
+                result = self.cache.to_tree(visited, cache)
             elif self.body:
-                result = self.body.to_tree(visited)
+                result = self.body.to_tree(visited, cache)
             else:
                 result = Term(TermType.VAR, var=0)
         elif self.kind == NodeKind.VAR:
@@ -161,17 +170,22 @@ class GraphNode:
                 if binding.kind == NodeKind.THUNK and not binding.evaluated:
                     result = Term(TermType.VAR, var=self.var)
                 else:
-                    result = binding.to_tree(visited)
+                    result = binding.to_tree(visited, cache)
             else:
                 result = Term(TermType.VAR, var=self.var if self.var is not None else 0)
         elif self.kind == NodeKind.ABS:
-            result = Term(TermType.ABS, body=self.body.to_tree(visited) if self.body else Term(TermType.VAR, var=0))
+            result = Term(TermType.ABS, body=self.body.to_tree(visited, cache) if self.body else Term(TermType.VAR, var=0))
         else:  # APP
             result = Term(TermType.APP,
-                       left=self.left.to_tree(visited) if self.left else Term(TermType.VAR, var=0),
-                       right=self.right.to_tree(visited) if self.right else Term(TermType.VAR, var=0))
+                       left=self.left.to_tree(visited, cache) if self.left else Term(TermType.VAR, var=0),
+                       right=self.right.to_tree(visited, cache) if self.right else Term(TermType.VAR, var=0))
 
         visited.discard(node_id)
+
+        # Cache the result before returning
+        if cache is not None:
+            cache[node_id] = result
+
         return result
 
 # ============================================================================
