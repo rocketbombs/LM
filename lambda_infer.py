@@ -2,12 +2,12 @@
 #
 # Lambda Calculus Reduction Inference Engine
 #
-# Loads a trained model checkpoint and investigates its reduction strategy
-# compared to the gold standard Levy graph reduction. Analyzes divergence
-# points, efficiency metrics, and emergent optimization behavior.
+# Loads a trained model checkpoint and compares its reduction strategy
+# against classical normal-order reduction. Analyzes divergence points,
+# efficiency metrics, and emergent optimization behavior.
 #
 # Usage:
-#   # Basic investigation with 100 terms
+#   # Basic comparison with 100 terms
 #   python lambda_infer.py --checkpoint runs/levy700m/checkpoints/step_10000.pt --num-terms 100
 #
 #   # Detailed output with verbose mode
@@ -16,7 +16,7 @@
 #
 #   # Save results to JSON for further analysis
 #   python lambda_infer.py --checkpoint runs/levy700m/checkpoints/step_10000.pt \
-#       --num-terms 200 --output-dir results/investigation_10k
+#       --num-terms 200 --output-dir results/comparison_10k
 
 import argparse
 import json
@@ -32,7 +32,7 @@ import torch.nn.functional as F
 
 # Import from existing scripts
 from lambda_train import LambdaSpanPredictor, LambdaTokenizer, TrainingConfig
-from lambda_gen import (TermGenerator, GraphReducer, TreeReducer, Term, TermType,
+from lambda_gen import (TermGenerator, TreeReducer, Term, TermType,
                          reference_substitute, Renderer, RenderResult)
 
 
@@ -55,27 +55,27 @@ class InferenceConfig:
 @dataclass
 class ReductionTrace:
     # Trace of a reduction sequence.
-    strategy: str  # 'model' or 'gold'
+    strategy: str  # 'neural' or 'classical'
     steps: List[Tuple[str, Optional[Tuple[int, int]]]]  # (term_str, redex_span)
     converged: bool
     total_steps: int
     total_tokens: int
     tokens_per_step: List[int]
     final_term: Optional[Term] = None  # The final term object
-    divergence_step: Optional[int] = None  # When it diverged from gold
+    divergence_step: Optional[int] = None  # When it diverged from classical
 
 
 @dataclass
 class ComparisonMetrics:
-    # Metrics comparing model vs gold reduction.
+    # Metrics comparing neural vs classical reduction.
     term: str
-    model_trace: ReductionTrace
-    gold_trace: ReductionTrace
+    neural_trace: ReductionTrace
+    classical_trace: ReductionTrace
 
     # Efficiency metrics
-    model_faster: bool
-    step_difference: int  # Negative = model is faster
-    token_difference: int  # Negative = model uses fewer tokens
+    neural_faster: bool
+    step_difference: int  # Negative = neural is faster
+    token_difference: int  # Negative = neural uses fewer tokens
 
     # Divergence analysis
     diverged: bool
@@ -86,8 +86,8 @@ class ComparisonMetrics:
 
     # Optional fields with defaults
     divergence_context: Optional[str] = None
-    model_nf: str = ""
-    gold_nf: str = ""
+    neural_nf: str = ""
+    classical_nf: str = ""
 
 
 class InferenceEngine:
@@ -147,8 +147,9 @@ class InferenceEngine:
             libraries=[],
             allow_divergent=False
         )
-        self.gold_reducer = GraphReducer(max_steps=config.max_steps)
-        self.tree_reducer = TreeReducer(max_steps=config.max_steps)
+        # Use tree reducer for both classical and neural (normal-order strategy)
+        self.classical_reducer = TreeReducer(max_steps=config.max_steps)
+        self.neural_reducer = TreeReducer(max_steps=config.max_steps)
 
         # Statistics
         self.comparisons: List[ComparisonMetrics] = []
@@ -247,8 +248,8 @@ class InferenceEngine:
 
         return path, False, render_result
 
-    def reduce_with_model(self, term: Term) -> ReductionTrace:
-        # Reduce a term using model predictions for redex selection.
+    def reduce_with_neural(self, term: Term) -> ReductionTrace:
+        # Reduce a term using neural model predictions for redex selection.
 
         steps = []
         current_term = term
@@ -274,11 +275,11 @@ class InferenceEngine:
 
             steps.append((term_str, char_span))
 
-            # Accept model's NF prediction as-is
+            # Accept neural model's NF prediction as-is
             if is_nf or redex_path is None:
-                # Model predicts normal form - trust it
+                # Neural model predicts normal form - trust it
                 return ReductionTrace(
-                    strategy='model',
+                    strategy='neural',
                     steps=steps,
                     converged=True,
                     total_steps=step_num + 1,
@@ -291,7 +292,7 @@ class InferenceEngine:
             if not self._is_valid_redex_path(current_term, redex_path):
                 # Invalid prediction - accept as stopped
                 return ReductionTrace(
-                    strategy='model',
+                    strategy='neural',
                     steps=steps,
                     converged=True,
                     total_steps=step_num + 1,
@@ -302,12 +303,12 @@ class InferenceEngine:
 
             # Reduce at predicted path
             try:
-                current_term = self.tree_reducer._apply_reduction(current_term, redex_path)
+                current_term = self.neural_reducer._apply_reduction(current_term, redex_path)
             except Exception as e:
                 if self.config.verbose:
                     print(f"Reduction failed at step {step_num}: {e}")
                 return ReductionTrace(
-                    strategy='model',
+                    strategy='neural',
                     steps=steps,
                     converged=False,
                     total_steps=step_num + 1,
@@ -318,7 +319,7 @@ class InferenceEngine:
 
         # Exceeded max steps
         return ReductionTrace(
-            strategy='model',
+            strategy='neural',
             steps=steps,
             converged=False,
             total_steps=self.config.max_steps,
@@ -372,9 +373,9 @@ class InferenceEngine:
         except:
             return False
 
-    def reduce_with_gold(self, term: Term) -> ReductionTrace:
-        # Reduce using Levy graph reduction (gold standard).
-        trace, exceeded_max, _, _ = self.gold_reducer.reduce(term)
+    def reduce_with_classical(self, term: Term) -> ReductionTrace:
+        # Reduce using classical normal-order tree reduction (baseline).
+        trace, exceeded_max = self.classical_reducer.reduce(term)
 
         steps = []
         total_tokens = 0
@@ -399,7 +400,7 @@ class InferenceEngine:
             final_term_obj = term_obj
 
         return ReductionTrace(
-            strategy='gold',
+            strategy='classical',
             steps=steps,
             converged=not exceeded_max,
             total_steps=len(trace),
@@ -448,66 +449,66 @@ class InferenceEngine:
             print(f"\nTerm: {term_str}")
 
         # Run both reductions
-        model_trace = self.reduce_with_model(term)
-        gold_trace = self.reduce_with_gold(term)
+        neural_trace = self.reduce_with_neural(term)
+        classical_trace = self.reduce_with_classical(term)
 
         # Extract normal forms (strings and terms)
-        model_nf = model_trace.steps[-1][0] if model_trace.steps else term_str
-        gold_nf = gold_trace.steps[-1][0] if gold_trace.steps else term_str
+        neural_nf = neural_trace.steps[-1][0] if neural_trace.steps else term_str
+        classical_nf = classical_trace.steps[-1][0] if classical_trace.steps else term_str
 
         # Check if both are actually in normal form
-        model_is_nf = (model_trace.final_term is None or
-                      not self._has_redex(model_trace.final_term))
-        gold_is_nf = (gold_trace.final_term is None or
-                     not self._has_redex(gold_trace.final_term))
+        neural_is_nf = (neural_trace.final_term is None or
+                      not self._has_redex(neural_trace.final_term))
+        classical_is_nf = (classical_trace.final_term is None or
+                     not self._has_redex(classical_trace.final_term))
 
         # Check structural equality if both reached NF
         structurally_equal = False
-        if (model_trace.final_term is not None and
-            gold_trace.final_term is not None and
-            model_is_nf and gold_is_nf):
-            structurally_equal = self._terms_equal(model_trace.final_term,
-                                                   gold_trace.final_term)
+        if (neural_trace.final_term is not None and
+            classical_trace.final_term is not None and
+            neural_is_nf and classical_is_nf):
+            structurally_equal = self._terms_equal(neural_trace.final_term,
+                                                   classical_trace.final_term)
 
         # Check divergence
         diverged = False
         divergence_step = None
-        min_steps = min(len(model_trace.steps), len(gold_trace.steps))
+        min_steps = min(len(neural_trace.steps), len(classical_trace.steps))
 
         for i in range(min_steps):
-            if model_trace.steps[i][0] != gold_trace.steps[i][0]:
+            if neural_trace.steps[i][0] != classical_trace.steps[i][0]:
                 diverged = True
                 divergence_step = i
                 break
 
         # Compute metrics
-        step_diff = model_trace.total_steps - gold_trace.total_steps
-        token_diff = model_trace.total_tokens - gold_trace.total_tokens
+        step_diff = neural_trace.total_steps - classical_trace.total_steps
+        token_diff = neural_trace.total_tokens - classical_trace.total_tokens
 
         # Consider "same" if string match OR structural equality
-        same_nf = (model_nf == gold_nf) or structurally_equal
+        same_nf = (neural_nf == classical_nf) or structurally_equal
 
         context = None
-        if not model_is_nf:
-            context = "model_not_nf"
-        elif not gold_is_nf:
-            context = "gold_not_nf"
+        if not neural_is_nf:
+            context = "neural_not_nf"
+        elif not classical_is_nf:
+            context = "classical_not_nf"
         elif not same_nf:
             context = "different_nf"
 
         metrics = ComparisonMetrics(
             term=term_str,
-            model_trace=model_trace,
-            gold_trace=gold_trace,
-            model_faster=step_diff < 0,
+            neural_trace=neural_trace,
+            classical_trace=classical_trace,
+            neural_faster=step_diff < 0,
             step_difference=step_diff,
             token_difference=token_diff,
             diverged=diverged,
             divergence_step=divergence_step,
             same_normal_form=same_nf,
             divergence_context=context,
-            model_nf=model_nf,
-            gold_nf=gold_nf
+            neural_nf=neural_nf,
+            classical_nf=classical_nf
         )
 
         if self.config.verbose:
@@ -517,19 +518,19 @@ class InferenceEngine:
 
     def _print_comparison(self, metrics: ComparisonMetrics):
         # Print detailed comparison.
-        print(f"\n  Model: {metrics.model_trace.total_steps} steps, "
-              f"{metrics.model_trace.total_tokens} tokens")
-        print(f"  Gold:  {metrics.gold_trace.total_steps} steps, "
-              f"{metrics.gold_trace.total_tokens} tokens")
+        print(f"\n  Neural: {metrics.neural_trace.total_steps} steps, "
+              f"{metrics.neural_trace.total_tokens} tokens")
+        print(f"  Classical:  {metrics.classical_trace.total_steps} steps, "
+              f"{metrics.classical_trace.total_tokens} tokens")
         print(f"  Δ Steps: {metrics.step_difference:+d}, "
               f"Δ Tokens: {metrics.token_difference:+d}")
         print(f"  Diverged: {metrics.diverged} (step {metrics.divergence_step})")
         print(f"  Same NF: {metrics.same_normal_form}")
 
-    def run_investigation(self):
-        # Run full investigation on generated terms.
+    def run_comparison(self):
+        # Run full comparison on generated terms.
         print(f"\n{'='*70}")
-        print(f"Lambda Calculus Reduction Strategy Investigation")
+        print(f"Lambda Calculus Neural vs Classical Comparison")
         print(f"{'='*70}\n")
         print(f"Generating {self.config.num_terms} terms...")
         print(f"Depth range: [{self.config.min_depth}, {self.config.max_depth}]")
@@ -552,7 +553,7 @@ class InferenceEngine:
         if len(terms) < self.config.num_terms:
             print(f"Warning: Only generated {len(terms)} terms after {attempts} attempts")
 
-        print(f"\nRunning dual reduction (model vs gold)...\n")
+        print(f"\nRunning dual reduction (neural vs classical)...\n")
 
         # Run comparisons
         for i, term in enumerate(terms):
@@ -581,45 +582,45 @@ class InferenceEngine:
             return
 
         print(f"\n{'='*70}")
-        print(f"INVESTIGATION SUMMARY")
+        print(f"COMPARISON SUMMARY")
         print(f"{'='*70}\n")
 
         total = len(self.comparisons)
 
         # Convergence
-        model_converged = sum(1 for c in self.comparisons if c.model_trace.converged)
-        gold_converged = sum(1 for c in self.comparisons if c.gold_trace.converged)
+        neural_converged = sum(1 for c in self.comparisons if c.neural_trace.converged)
+        classical_converged = sum(1 for c in self.comparisons if c.classical_trace.converged)
 
         print(f"Convergence:")
-        print(f"  Model: {model_converged}/{total} ({100*model_converged/total:.1f}%)")
-        print(f"  Gold:  {gold_converged}/{total} ({100*gold_converged/total:.1f}%)")
+        print(f"  Neural: {neural_converged}/{total} ({100*neural_converged/total:.1f}%)")
+        print(f"  Classical: {classical_converged}/{total} ({100*classical_converged/total:.1f}%)")
 
         # Correctness
         same_nf = sum(1 for c in self.comparisons if c.same_normal_form)
-        print(f"\nCorrectness:")
+        print(f"\nAccuracy (Correct NF):")
         print(f"  Same normal form: {same_nf}/{total} ({100*same_nf/total:.1f}%)")
 
         # Breakdown of mismatches
-        model_not_nf = sum(1 for c in self.comparisons
-                          if c.divergence_context == "model_not_nf")
-        gold_not_nf = sum(1 for c in self.comparisons
-                         if c.divergence_context == "gold_not_nf")
+        neural_not_nf = sum(1 for c in self.comparisons
+                          if c.divergence_context == "neural_not_nf")
+        classical_not_nf = sum(1 for c in self.comparisons
+                         if c.divergence_context == "classical_not_nf")
         different_nf = sum(1 for c in self.comparisons
                           if c.divergence_context == "different_nf")
 
-        if model_not_nf + gold_not_nf + different_nf > 0:
+        if neural_not_nf + classical_not_nf + different_nf > 0:
             print(f"\nNormal Form Analysis:")
-            print(f"  Model stopped early (still has redex): {model_not_nf}/{total} "
-                  f"({100*model_not_nf/total:.1f}%)")
-            print(f"  Gold not in NF (unexpected): {gold_not_nf}/{total} "
-                  f"({100*gold_not_nf/total:.1f}%)")
+            print(f"  Neural stopped early (still has redex): {neural_not_nf}/{total} "
+                  f"({100*neural_not_nf/total:.1f}%)")
+            print(f"  Classical not in NF (unexpected): {classical_not_nf}/{total} "
+                  f"({100*classical_not_nf/total:.1f}%)")
             print(f"  Both in NF but different: {different_nf}/{total} "
                   f"({100*different_nf/total:.1f}%)")
 
         # Divergence
         diverged = sum(1 for c in self.comparisons if c.diverged)
-        print(f"\nStrategy Divergence:")
-        print(f"  Diverged: {diverged}/{total} ({100*diverged/total:.1f}%)")
+        print(f"\nPath Divergence:")
+        print(f"  Different paths: {diverged}/{total} ({100*diverged/total:.1f}%)")
 
         if diverged > 0:
             div_steps = [c.divergence_step for c in self.comparisons
@@ -629,10 +630,10 @@ class InferenceEngine:
                 print(f"  Average divergence step: {avg_div_step:.1f}")
 
         # Efficiency
-        model_faster_count = sum(1 for c in self.comparisons if c.model_faster)
+        neural_faster_count = sum(1 for c in self.comparisons if c.neural_faster)
         print(f"\nEfficiency (Steps):")
-        print(f"  Model faster: {model_faster_count}/{total} "
-              f"({100*model_faster_count/total:.1f}%)")
+        print(f"  Neural faster: {neural_faster_count}/{total} "
+              f"({100*neural_faster_count/total:.1f}%)")
 
         step_diffs = [c.step_difference for c in self.comparisons]
         token_diffs = [c.token_difference for c in self.comparisons]
@@ -640,49 +641,58 @@ class InferenceEngine:
         avg_step_diff = sum(step_diffs) / len(step_diffs)
         avg_token_diff = sum(token_diffs) / len(token_diffs)
 
-        print(f"  Average step difference: {avg_step_diff:+.2f}")
+        print(f"  Average step difference: {avg_step_diff:+.2f} (negative = neural faster)")
         print(f"  Average token difference: {avg_token_diff:+.2f}")
 
+        # Step efficiency
+        neural_avg_steps = sum(c.neural_trace.total_steps for c in self.comparisons) / total
+        classical_avg_steps = sum(c.classical_trace.total_steps for c in self.comparisons) / total
+        efficiency = (neural_avg_steps / classical_avg_steps) * 100 if classical_avg_steps > 0 else 100
+
+        print(f"\n  Neural avg steps: {neural_avg_steps:.2f}")
+        print(f"  Classical avg steps: {classical_avg_steps:.2f}")
+        print(f"  Step efficiency: {efficiency:.1f}% (neural uses {efficiency:.1f}% of classical steps)")
+
         # Token throughput
-        model_avg_tokens = sum(c.model_trace.total_tokens for c in self.comparisons) / total
-        gold_avg_tokens = sum(c.gold_trace.total_tokens for c in self.comparisons) / total
+        neural_avg_tokens = sum(c.neural_trace.total_tokens for c in self.comparisons) / total
+        classical_avg_tokens = sum(c.classical_trace.total_tokens for c in self.comparisons) / total
 
         print(f"\nToken Throughput:")
-        print(f"  Model avg total tokens: {model_avg_tokens:.1f}")
-        print(f"  Gold avg total tokens: {gold_avg_tokens:.1f}")
+        print(f"  Neural avg total tokens: {neural_avg_tokens:.1f}")
+        print(f"  Classical avg total tokens: {classical_avg_tokens:.1f}")
 
-        # Most interesting divergences
+        # Most interesting cases
         print(f"\nMost Interesting Cases:")
 
-        # Cases where model is significantly faster
+        # Cases where neural is significantly faster
         faster_cases = sorted([c for c in self.comparisons if c.step_difference < -2],
                             key=lambda c: c.step_difference)[:3]
 
         if faster_cases:
-            print(f"\n  Model significantly faster:")
+            print(f"\n  Neural significantly faster:")
             for c in faster_cases:
                 print(f"    {c.step_difference:+d} steps | Term: {c.term[:60]}...")
                 if self.config.verbose or len(faster_cases) <= 1:
-                    print(f"      Model NF: {c.model_nf[:50]}...")
-                    print(f"      Gold NF:  {c.gold_nf[:50]}...")
+                    print(f"      Neural NF: {c.neural_nf[:50]}...")
+                    print(f"      Classical NF:  {c.classical_nf[:50]}...")
 
-        # Cases where model is significantly slower
+        # Cases where neural is significantly slower
         slower_cases = sorted([c for c in self.comparisons if c.step_difference > 2],
                             key=lambda c: -c.step_difference)[:3]
 
         if slower_cases:
-            print(f"\n  Model significantly slower:")
+            print(f"\n  Neural significantly slower:")
             for c in slower_cases:
                 print(f"    {c.step_difference:+d} steps | Term: {c.term[:60]}...")
 
-        # Cases with different normal forms (potential model errors)
+        # Cases with different normal forms (potential neural errors)
         different_nf = [c for c in self.comparisons if not c.same_normal_form]
         if different_nf:
-            print(f"\n  Different normal forms (potential errors): {len(different_nf)}")
+            print(f"\n  Different normal forms (errors): {len(different_nf)}")
             for c in different_nf[:2]:
                 print(f"    Term: {c.term[:50]}...")
-                print(f"      Model NF: {c.model_nf[:50]}...")
-                print(f"      Gold NF:  {c.gold_nf[:50]}...")
+                print(f"      Neural NF: {c.neural_nf[:50]}...")
+                print(f"      Classical NF:  {c.classical_nf[:50]}...")
 
         print(f"\n{'='*70}\n")
 
@@ -708,23 +718,23 @@ class InferenceEngine:
             'comparisons': [
                 {
                     'term': c.term,
-                    'model_steps': c.model_trace.total_steps,
-                    'gold_steps': c.gold_trace.total_steps,
-                    'model_tokens': c.model_trace.total_tokens,
-                    'gold_tokens': c.gold_trace.total_tokens,
+                    'neural_steps': c.neural_trace.total_steps,
+                    'classical_steps': c.classical_trace.total_steps,
+                    'neural_tokens': c.neural_trace.total_tokens,
+                    'classical_tokens': c.classical_trace.total_tokens,
                     'step_difference': c.step_difference,
                     'token_difference': c.token_difference,
                     'diverged': c.diverged,
                     'divergence_step': c.divergence_step,
                     'same_nf': c.same_normal_form,
-                    'model_nf': c.model_nf,
-                    'gold_nf': c.gold_nf,
+                    'neural_nf': c.neural_nf,
+                    'classical_nf': c.classical_nf,
                 }
                 for c in self.comparisons
             ]
         }
 
-        output_file = output_dir / 'investigation_results.json'
+        output_file = output_dir / 'comparison_results.json'
         with open(output_file, 'w') as f:
             json.dump(results, f, indent=2)
 
@@ -733,12 +743,12 @@ class InferenceEngine:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Investigate lambda calculus reduction strategies',
+        description='Compare neural vs classical lambda calculus reduction',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
     parser.add_argument('--checkpoint', required=True,
-                       help='Path to model checkpoint')
+                       help='Path to neural model checkpoint')
     parser.add_argument('--num-terms', type=int, default=100,
                        help='Number of terms to test')
     parser.add_argument('--min-depth', type=int, default=2,
@@ -761,9 +771,9 @@ def main():
     args = parser.parse_args()
     config = InferenceConfig(**vars(args))
 
-    # Run investigation
+    # Run comparison
     engine = InferenceEngine(config)
-    engine.run_investigation()
+    engine.run_comparison()
 
 
 if __name__ == '__main__':

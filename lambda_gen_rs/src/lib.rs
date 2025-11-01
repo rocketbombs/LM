@@ -21,9 +21,15 @@ pub mod generator;
 pub mod parallel;
 pub mod render;
 pub mod schema;
+pub mod classical;
+pub mod tokenizer;
+pub mod neural;
 
 pub use term::{Term, TermType, TermArena};
 pub use reduction::{GraphReducer, ReductionConfig, ReductionTrace};
 pub use generator::{TermGenerator, GeneratorConfig};
 pub use parallel::{ParallelPipeline, PipelineConfig};
 pub use schema::TrainingExample;
+pub use classical::ClassicalReducer;
+pub use tokenizer::LambdaTokenizer;
+pub use neural::NeuralReducer;
