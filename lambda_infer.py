@@ -290,11 +290,12 @@ class InferenceEngine:
 
             # Verify the path points to a valid redex
             if not self._is_valid_redex_path(current_term, redex_path):
-                # Invalid prediction - accept as stopped
+                # Invalid prediction - check if term actually has redexes
+                has_redexes = self._has_redex(current_term)
                 return ReductionTrace(
                     strategy='neural',
                     steps=steps,
-                    converged=True,
+                    converged=not has_redexes,  # Only converged if truly in NF
                     total_steps=step_num + 1,
                     total_tokens=total_tokens,
                     tokens_per_step=tokens_per_step,

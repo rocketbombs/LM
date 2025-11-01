@@ -537,26 +537,30 @@ def reference_substitute(term: Term, var: int, replacement: Term) -> Term:
     #Slow, obviously-correct capture-avoiding substitution.#
     def shift(t: Term, amount: int, cutoff: int = 0) -> Term:
         if t.type == TermType.VAR:
-            if t.var >= cutoff:
+            if t.var is not None and t.var >= cutoff:
                 return Term(TermType.VAR, var=t.var + amount)
             return t
         elif t.type == TermType.ABS:
+            assert t.body is not None, "ABS must have body"
             return Term(TermType.ABS, body=shift(t.body, amount, cutoff + 1))
-        else:
+        else:  # APP
+            assert t.left is not None and t.right is not None, "APP must have left and right"
             return Term(TermType.APP, left=shift(t.left, amount, cutoff),
                        right=shift(t.right, amount, cutoff))
-    
+
     def subst(t: Term, v: int, repl: Term, depth: int = 0) -> Term:
         if t.type == TermType.VAR:
             if t.var == v + depth:
                 return shift(repl, depth)
             return t
         elif t.type == TermType.ABS:
+            assert t.body is not None, "ABS must have body"
             return Term(TermType.ABS, body=subst(t.body, v, repl, depth + 1))
-        else:
+        else:  # APP
+            assert t.left is not None and t.right is not None, "APP must have left and right"
             return Term(TermType.APP, left=subst(t.left, v, repl, depth),
                        right=subst(t.right, v, repl, depth))
-    
+
     return subst(term, var, replacement, 0)
 
 def terms_alpha_equiv(t1: Term, t2: Term) -> bool:
@@ -597,34 +601,44 @@ class TreeReducer:
         #Find leftmost-outermost β-redex.#
         if path is None:
             path = []
-        
-        if term.type == TermType.APP and term.left.type == TermType.ABS:
+
+        # Check for redex at current position: (λ.body) arg
+        if term.type == TermType.APP and term.left and term.left.type == TermType.ABS:
             return path
-        
-        if term.type == TermType.ABS:
+
+        # Recurse into subterms (leftmost-outermost = depth-first left-to-right)
+        if term.type == TermType.ABS and term.body:
             return self._find_leftmost_outermost(term.body, path + [0])
         elif term.type == TermType.APP:
-            left_result = self._find_leftmost_outermost(term.left, path + [0])
-            if left_result:
-                return left_result
-            return self._find_leftmost_outermost(term.right, path + [1])
-        
+            if term.left:
+                left_result = self._find_leftmost_outermost(term.left, path + [0])
+                if left_result:
+                    return left_result
+            if term.right:
+                return self._find_leftmost_outermost(term.right, path + [1])
+
         return None
     
     def _apply_reduction(self, term: Term, path: List[int]) -> Term:
         #Apply β-reduction at specified path.#
         if not path:
-            assert term.type == TermType.APP and term.left.type == TermType.ABS
+            # At the redex: (λ.body) arg → body[0 := arg]
+            assert term.type == TermType.APP and term.left and term.left.type == TermType.ABS
+            assert term.left.body is not None, "ABS must have body"
+            assert term.right is not None, "APP must have right child"
             return reference_substitute(term.left.body, 0, term.right)
-        
+
         direction = path[0]
         if term.type == TermType.ABS:
+            assert term.body is not None, "ABS must have body to reduce within"
             return Term(TermType.ABS, body=self._apply_reduction(term.body, path[1:]))
-        else:
+        else:  # APP
             if direction == 0:
+                assert term.left is not None, "APP must have left child"
                 return Term(TermType.APP, left=self._apply_reduction(term.left, path[1:]),
                            right=term.right)
             else:
+                assert term.right is not None, "APP must have right child"
                 return Term(TermType.APP, left=term.left,
                            right=self._apply_reduction(term.right, path[1:]))
 
