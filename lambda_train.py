@@ -421,7 +421,22 @@ class LambdaDataset(Dataset):
         
         # Check if this is a normal form (no redex)
         is_nf = (start_char == 0 and end_char == 0)
-        
+
+        # VALIDATION: NF markers (0,0) should only appear on final steps
+        # The generator (parallel.rs:318) filters out mid-trace NF markers
+        # This check defends against data corruption
+        step_k = ex.get('step_k', 0)
+        steps_total = ex['steps_total']
+        if is_nf and step_k < steps_total:
+            # Data corruption: mid-trace NF marker detected
+            import warnings
+            warnings.warn(
+                f"Invalid NF marker (0,0) at step {step_k}/{steps_total} in trace {ex.get('trace_id', 'unknown')}. "
+                f"This should never happen with the fixed generator. Treating as reducible to avoid training corruption."
+            )
+            # Treat as reducible to avoid training on corrupted data
+            is_nf = False
+
         # Extract fuel budget metrics from metadata (with defaults for backwards compatibility)
         meta = ex.get('meta', {})
         fuel_remaining = meta.get('fuel_remaining', 0)
@@ -1045,14 +1060,22 @@ def compute_span_metrics(outputs: Dict[str, torch.Tensor],
 
     # Span IoU (only for reducible examples)
     def span_iou(pred_start, pred_end, gold_start, gold_end):
-        #Compute IoU for single span pair.#
+        #Compute IoU for single span pair.
+
+        Spans are [start, end) - exclusive end, following Python slicing convention.
+        For exclusive spans:
+        - Intersection: [max(a,c), min(b,d)) with size max(0, min(b,d) - max(a,c))
+        - Union: size(A) + size(B) - intersection
+        #
         intersection_start = max(pred_start, gold_start)
         intersection_end = min(pred_end, gold_end)
-        intersection = max(0, intersection_end - intersection_start + 1)
+        intersection = max(0, intersection_end - intersection_start)  # No +1 for exclusive end
 
-        union_start = min(pred_start, gold_start)
-        union_end = max(pred_end, gold_end)
-        union = max(1, union_end - union_start + 1)  # Ensure at least 1 to avoid division by zero
+        # Union = size(pred) + size(gold) - intersection
+        pred_size = pred_end - pred_start
+        gold_size = gold_end - gold_start
+        union = pred_size + gold_size - intersection
+        union = max(1, union)  # Avoid division by zero
 
         return intersection / union
 
@@ -1419,9 +1442,11 @@ class Trainer:
         text = ''.join(text_tokens)
         
         # Create highlighted versions
-        # Subtract 1 only from start (to account for BOS), keep end as exclusive
-        pred_text = highlight_span(text, start_pred - 1, end_pred, '⟨⟩')
-        gold_text = highlight_span(text, start_gold - 1, end_gold, '⟨⟩')
+        # CRITICAL FIX: Both start and end must be adjusted for BOS token
+        # Token indices include BOS at position 0, so both need -1 to map to char offsets
+        # The text is extracted without BOS/EOS (line 1418), so indices are offset by 1
+        pred_text = highlight_span(text, start_pred - 1, end_pred - 1, '⟨⟩')
+        gold_text = highlight_span(text, start_gold - 1, end_gold - 1, '⟨⟩')
         
         sample_text = f"Gold: {gold_text}\nPred: {pred_text}\n"
         samples.append(sample_text)
