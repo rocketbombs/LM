@@ -56,12 +56,14 @@ class InferenceConfig:
 class ReductionTrace:
     # Trace of a reduction sequence.
     strategy: str  # 'neural' or 'classical'
-    steps: List[Tuple[str, Optional[Tuple[int, int]]]]  # (term_str, redex_span)
+    # steps removed to save memory - for 1000+ step reductions, storing all
+    # intermediate term strings (300+ chars each) wastes 300KB+ per trace
+    # We only need final_nf_str for comparison
     converged: bool
     total_steps: int
     total_tokens: int
-    # tokens_per_step removed to save memory - was unused and for 1000+ steps wastes space
-    final_term: Optional[Term] = None  # The final term object
+    final_nf_str: str = ""  # Final normal form as string for comparison
+    final_term: Optional[Term] = None  # The final term object (set to None after comparison)
     divergence_step: Optional[int] = None  # When it diverged from classical
 
 
@@ -219,6 +221,11 @@ class InferenceEngine:
 
         # Check if model predicts normal form
         nf_prob = torch.sigmoid(torch.tensor(nf_logit)).item()
+
+        if self.config.verbose:
+            has_redex = self._has_redex(term)
+            print(f"    Model NF prediction: {nf_prob:.4f} | Actual has redex: {has_redex}")
+
         if nf_prob > 0.5:
             return None, True, render_result
 
@@ -251,37 +258,30 @@ class InferenceEngine:
     def reduce_with_neural(self, term: Term) -> ReductionTrace:
         # Reduce a term using neural model predictions for redex selection.
 
-        steps = []
         current_term = term
         total_tokens = 0
+        initial_term_str = None
 
         for step_num in range(self.config.max_steps):
             term_str = Renderer.to_debruijn_with_spans(current_term).string
+            if step_num == 0:
+                initial_term_str = term_str
             term_tokens = len(term_str)
             total_tokens += term_tokens
 
             # Get model prediction
             redex_path, is_nf, render_result = self.predict_redex(current_term)
 
-            # Store step with character span (if available)
-            char_span = None
-            if redex_path and len(redex_path) > 0:
-                # Find the span corresponding to this path
-                node_id = self._path_to_node_id(redex_path)
-                if node_id in render_result.spans:
-                    char_span = render_result.spans[node_id]
-
-            steps.append((term_str, char_span))
-
             # Accept neural model's NF prediction as-is
             if is_nf or redex_path is None:
                 # Neural model predicts normal form - trust it
+                final_nf_str = Renderer.to_debruijn_with_spans(current_term).string
                 return ReductionTrace(
                     strategy='neural',
-                    steps=steps,
                     converged=True,
                     total_steps=step_num + 1,
                     total_tokens=total_tokens,
+                    final_nf_str=final_nf_str,
                     final_term=current_term
                 )
 
@@ -289,12 +289,13 @@ class InferenceEngine:
             if not self._is_valid_redex_path(current_term, redex_path):
                 # Invalid prediction - check if term actually has redexes
                 has_redexes = self._has_redex(current_term)
+                final_nf_str = Renderer.to_debruijn_with_spans(current_term).string
                 return ReductionTrace(
                     strategy='neural',
-                    steps=steps,
                     converged=not has_redexes,  # Only converged if truly in NF
                     total_steps=step_num + 1,
                     total_tokens=total_tokens,
+                    final_nf_str=final_nf_str,
                     final_term=current_term
                 )
 
@@ -304,22 +305,24 @@ class InferenceEngine:
             except Exception as e:
                 if self.config.verbose:
                     print(f"Reduction failed at step {step_num}: {e}")
+                final_nf_str = Renderer.to_debruijn_with_spans(current_term).string
                 return ReductionTrace(
                     strategy='neural',
-                    steps=steps,
                     converged=False,
                     total_steps=step_num + 1,
                     total_tokens=total_tokens,
+                    final_nf_str=final_nf_str,
                     final_term=current_term
                 )
 
         # Exceeded max steps
+        final_nf_str = Renderer.to_debruijn_with_spans(current_term).string
         return ReductionTrace(
             strategy='neural',
-            steps=steps,
             converged=False,
             total_steps=self.config.max_steps,
             total_tokens=total_tokens,
+            final_nf_str=final_nf_str,
             final_term=current_term
         )
 
@@ -372,11 +375,11 @@ class InferenceEngine:
         # Reduce using classical normal-order tree reduction (baseline).
         trace, exceeded_max = self.classical_reducer.reduce(term)
 
-        steps = []
         total_tokens = 0
         final_term_obj = None
+        final_nf_str = ""
 
-        # Process trace immediately to free Term objects
+        # Process trace immediately, don't store intermediate strings
         trace_len = len(trace)
         for i, (term_obj, redex_path) in enumerate(trace):
             # Validate that term_obj is actually a Term
@@ -388,29 +391,20 @@ class InferenceEngine:
             term_tokens = len(term_str)
             total_tokens += term_tokens
 
-            # Convert path to character span if available
-            redex_span = None
-            if redex_path:
-                render_result = Renderer.to_debruijn_with_spans(term_obj)
-                node_id = self._path_to_node_id(redex_path)
-                if node_id in render_result.spans:
-                    redex_span = render_result.spans[node_id]
-
-            steps.append((term_str, redex_span))
-
-            # Keep only the final term
+            # Keep only the final term and its string
             if i == trace_len - 1:
                 final_term_obj = term_obj
+                final_nf_str = term_str
 
         # Explicitly delete trace to free memory immediately
         del trace
 
         return ReductionTrace(
             strategy='classical',
-            steps=steps,
             converged=not exceeded_max,
             total_steps=trace_len,
             total_tokens=total_tokens,
+            final_nf_str=final_nf_str,
             final_term=final_term_obj
         )
 
@@ -461,8 +455,8 @@ class InferenceEngine:
         classical_trace = self.reduce_with_classical(term)
 
         # Extract normal forms (strings and terms)
-        neural_nf = neural_trace.steps[-1][0] if neural_trace.steps else term_str
-        classical_nf = classical_trace.steps[-1][0] if classical_trace.steps else term_str
+        neural_nf = neural_trace.final_nf_str
+        classical_nf = classical_trace.final_nf_str
 
         # Check if both are actually in normal form
         neural_is_nf = (neural_trace.final_term is None or
@@ -478,16 +472,10 @@ class InferenceEngine:
             structurally_equal = self._terms_equal(neural_trace.final_term,
                                                    classical_trace.final_term)
 
-        # Check divergence
-        diverged = False
-        divergence_step = None
-        min_steps = min(len(neural_trace.steps), len(classical_trace.steps))
-
-        for i in range(min_steps):
-            if neural_trace.steps[i][0] != classical_trace.steps[i][0]:
-                diverged = True
-                divergence_step = i
-                break
+        # Check divergence - we can't determine exact step anymore since we don't store
+        # intermediate terms, but we can infer divergence from different step counts or NFs
+        diverged = (neural_trace.total_steps != classical_trace.total_steps) or (neural_nf != classical_nf)
+        divergence_step = None  # Can't determine exact step without storing intermediate terms
 
         # Compute metrics
         step_diff = neural_trace.total_steps - classical_trace.total_steps
