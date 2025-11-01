@@ -60,7 +60,7 @@ class ReductionTrace:
     converged: bool
     total_steps: int
     total_tokens: int
-    tokens_per_step: List[int]
+    # tokens_per_step removed to save memory - was unused and for 1000+ steps wastes space
     final_term: Optional[Term] = None  # The final term object
     divergence_step: Optional[int] = None  # When it diverged from classical
 
@@ -254,13 +254,11 @@ class InferenceEngine:
         steps = []
         current_term = term
         total_tokens = 0
-        tokens_per_step = []
 
         for step_num in range(self.config.max_steps):
             term_str = Renderer.to_debruijn_with_spans(current_term).string
             term_tokens = len(term_str)
             total_tokens += term_tokens
-            tokens_per_step.append(term_tokens)
 
             # Get model prediction
             redex_path, is_nf, render_result = self.predict_redex(current_term)
@@ -284,7 +282,6 @@ class InferenceEngine:
                     converged=True,
                     total_steps=step_num + 1,
                     total_tokens=total_tokens,
-                    tokens_per_step=tokens_per_step,
                     final_term=current_term
                 )
 
@@ -298,7 +295,6 @@ class InferenceEngine:
                     converged=not has_redexes,  # Only converged if truly in NF
                     total_steps=step_num + 1,
                     total_tokens=total_tokens,
-                    tokens_per_step=tokens_per_step,
                     final_term=current_term
                 )
 
@@ -314,7 +310,6 @@ class InferenceEngine:
                     converged=False,
                     total_steps=step_num + 1,
                     total_tokens=total_tokens,
-                    tokens_per_step=tokens_per_step,
                     final_term=current_term
                 )
 
@@ -325,7 +320,6 @@ class InferenceEngine:
             converged=False,
             total_steps=self.config.max_steps,
             total_tokens=total_tokens,
-            tokens_per_step=tokens_per_step,
             final_term=current_term
         )
 
@@ -380,9 +374,10 @@ class InferenceEngine:
 
         steps = []
         total_tokens = 0
-        tokens_per_step = []
         final_term_obj = None
 
+        # Process trace immediately to free Term objects
+        trace_len = len(trace)
         for i, (term_obj, redex_path) in enumerate(trace):
             # Validate that term_obj is actually a Term
             if not isinstance(term_obj, Term):
@@ -392,7 +387,6 @@ class InferenceEngine:
             term_str = Renderer.to_debruijn_with_spans(term_obj).string
             term_tokens = len(term_str)
             total_tokens += term_tokens
-            tokens_per_step.append(term_tokens)
 
             # Convert path to character span if available
             redex_span = None
@@ -403,15 +397,20 @@ class InferenceEngine:
                     redex_span = render_result.spans[node_id]
 
             steps.append((term_str, redex_span))
-            final_term_obj = term_obj
+
+            # Keep only the final term
+            if i == trace_len - 1:
+                final_term_obj = term_obj
+
+        # Explicitly delete trace to free memory immediately
+        del trace
 
         return ReductionTrace(
             strategy='classical',
             steps=steps,
             converged=not exceeded_max,
-            total_steps=len(trace),
+            total_steps=trace_len,
             total_tokens=total_tokens,
-            tokens_per_step=tokens_per_step,
             final_term=final_term_obj
         )
 
@@ -522,6 +521,11 @@ class InferenceEngine:
 
         if self.config.verbose:
             self._print_comparison(metrics)
+
+        # Free memory: We no longer need the Term objects after comparison
+        # They've served their purpose for structural equality checking
+        neural_trace.final_term = None
+        classical_trace.final_term = None
 
         return metrics
 
