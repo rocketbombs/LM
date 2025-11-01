@@ -584,7 +584,13 @@ class TreeReducer:
         trace = []
         current = term
 
+        # Validate input
+        assert isinstance(current, Term), f"reduce() requires Term, got {type(current)}"
+
         for step in range(self.max_steps):
+            # Validate current is still a Term
+            assert isinstance(current, Term), f"Step {step}: current should be Term, got {type(current)}"
+
             redex_path = self._find_leftmost_outermost(current)
             trace.append((current, redex_path))
 
@@ -592,6 +598,9 @@ class TreeReducer:
                 return trace, False
 
             current = self._apply_reduction(current, redex_path)
+
+            # Validate the reduction result
+            assert isinstance(current, Term), f"Step {step}: _apply_reduction returned {type(current)}, expected Term"
 
         final_redex = self._find_leftmost_outermost(current)
         trace.append((current, final_redex))
@@ -621,26 +630,32 @@ class TreeReducer:
     
     def _apply_reduction(self, term: Term, path: List[int]) -> Term:
         #Apply β-reduction at specified path.#
+        assert isinstance(term, Term), f"_apply_reduction requires Term, got {type(term)}"
+
         if not path:
             # At the redex: (λ.body) arg → body[0 := arg]
-            assert term.type == TermType.APP and term.left and term.left.type == TermType.ABS
+            assert term.type == TermType.APP and term.left and term.left.type == TermType.ABS, \
+                f"Redex must be APP of ABS, got {term.type}"
             assert term.left.body is not None, "ABS must have body"
             assert term.right is not None, "APP must have right child"
-            return reference_substitute(term.left.body, 0, term.right)
+            result = reference_substitute(term.left.body, 0, term.right)
+            assert isinstance(result, Term), f"reference_substitute returned {type(result)}, expected Term"
+            return result
 
         direction = path[0]
         if term.type == TermType.ABS:
             assert term.body is not None, "ABS must have body to reduce within"
-            return Term(TermType.ABS, body=self._apply_reduction(term.body, path[1:]))
+            new_body = self._apply_reduction(term.body, path[1:])
+            return Term(TermType.ABS, body=new_body)
         else:  # APP
             if direction == 0:
                 assert term.left is not None, "APP must have left child"
-                return Term(TermType.APP, left=self._apply_reduction(term.left, path[1:]),
-                           right=term.right)
+                new_left = self._apply_reduction(term.left, path[1:])
+                return Term(TermType.APP, left=new_left, right=term.right)
             else:
                 assert term.right is not None, "APP must have right child"
-                return Term(TermType.APP, left=term.left,
-                           right=self._apply_reduction(term.right, path[1:]))
+                new_right = self._apply_reduction(term.right, path[1:])
+                return Term(TermType.APP, left=term.left, right=new_right)
 
 # ============================================================================
 # GRAPH REDUCTION (call-by-need with sharing)

@@ -383,7 +383,12 @@ class InferenceEngine:
         tokens_per_step = []
         final_term_obj = None
 
-        for term_obj, redex_path in trace:
+        for i, (term_obj, redex_path) in enumerate(trace):
+            # Validate that term_obj is actually a Term
+            if not isinstance(term_obj, Term):
+                raise TypeError(f"Trace step {i}: expected Term, got {type(term_obj).__name__}. "
+                              f"This is a bug in TreeReducer.")
+
             term_str = Renderer.to_debruijn_with_spans(term_obj).string
             term_tokens = len(term_str)
             total_tokens += term_tokens
@@ -444,6 +449,9 @@ class InferenceEngine:
 
     def compare_strategies(self, term: Term) -> ComparisonMetrics:
         # Run both strategies and compare results.
+        if not isinstance(term, Term):
+            raise TypeError(f"compare_strategies requires Term, got {type(term).__name__}")
+
         term_str = Renderer.to_debruijn_with_spans(term).string
 
         if self.config.verbose:
