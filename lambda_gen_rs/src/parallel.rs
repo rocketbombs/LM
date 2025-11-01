@@ -7,7 +7,7 @@
 //! - Batched output to minimize synchronization
 
 use crate::generator::{GeneratorConfig, TermGenerator, SimpleRng};
-use crate::reduction::{GraphReducer, ReductionConfig};
+use crate::classical::ClassicalReducer;
 use crate::render::{get_redex_span, render_debruijn};
 use crate::schema::{ExampleMetadata, TrainingExample};
 use std::collections::hash_map::DefaultHasher;
@@ -21,7 +21,7 @@ use std::thread;
 pub struct PipelineConfig {
     pub num_workers: usize,
     pub generator_config: GeneratorConfig,
-    pub reduction_config: ReductionConfig,
+    pub max_steps: usize,  // Simplified: just max steps for reduction
     pub strategy: String,
     pub render: String,
     pub seed: u64,
@@ -38,8 +38,8 @@ impl Default for PipelineConfig {
         PipelineConfig {
             num_workers,
             generator_config: GeneratorConfig::default(),
-            reduction_config: ReductionConfig::default(),
-            strategy: "levy_like".to_string(),
+            max_steps: 1000,  // Max reduction steps before giving up
+            strategy: "normal".to_string(),  // Normal-order reduction
             render: "debruijn".to_string(),
             seed: 42,
             max_terms: None,
@@ -64,7 +64,9 @@ impl ParallelPipeline {
     where
         F: FnMut(TrainingExample) + Send + 'static,
     {
-        let (tx, rx) = sync_channel::<TrainingExample>(self.config.num_workers * 100);
+        // Use larger buffer to prevent blocking (avg 100 examples/trace × 10 traces)
+        let channel_buffer = self.config.num_workers * 1000;
+        let (tx, rx) = sync_channel::<TrainingExample>(channel_buffer);
         let examples_generated = Arc::new(AtomicUsize::new(0));
         let should_stop = Arc::new(AtomicBool::new(false));
 
@@ -133,7 +135,7 @@ impl ParallelPipeline {
                     let mut rng = SimpleRng::seed_from_u64(mixed_seed);
 
                     // Per-worker reducer (no contention)
-                    let mut reducer = GraphReducer::new(config.reduction_config.clone());
+                    let reducer = ClassicalReducer::new(config.max_steps);
 
                     // DIVERSITY: Vary generation parameters per chunk for maximum variety
                     // Cycle through different complexity levels to ensure broad coverage
@@ -173,6 +175,10 @@ impl ParallelPipeline {
                     // Per-worker generator with varied parameters
                     let generator = TermGenerator::new(varied_config);
 
+                    // OPTIMIZATION: Clone strategy/render once per worker instead of per-example
+                    let strategy_str = config.strategy.clone();
+                    let render_str = config.render.clone();
+
                     // Generate chunk of terms
                     for draw_index in 0..chunk_size {
                         if should_stop.load(Ordering::Relaxed) {
@@ -202,180 +208,214 @@ impl ParallelPipeline {
                         None => continue,
                     };
 
-                    // Reduce term
-                    let trace = reducer.reduce(&term);
+                    // MEMORY EFFICIENT: Use streaming reduction with callback
+                    // Process each step immediately without accumulating trace
 
-                        // Check if we should include diverged terms
-                        if trace.diverged && !config.generator_config.allow_divergent {
-                            continue;
+                    // Track metadata across streaming callback
+                    let mut initial_size = 0;
+                    let mut final_size = 0;
+                    let mut step_count = 0;
+
+                    // Buffer examples temporarily for validation
+                    // (still need to validate trace before emitting)
+                    let mut buffered_examples = Vec::new();
+
+                    let trace_id = format!("{:016x}-{:016x}", worker_seed, draw_index);
+
+                    // Stream reduction with callback
+                    let (converged, total_steps, total_time_ms) = reducer.reduce_with_streaming(&term, |step_k, current_term, redex_path, _is_final| {
+                        // CRITICAL: Check should_stop to prevent starting NEW traces
+                        // But ALWAYS complete in-progress traces to ensure model sees final NF steps
+                        if should_stop.load(Ordering::Relaxed) && step_k == 0 {
+                            return false;  // Abort only if we haven't started reduction yet
                         }
 
-                        // Compute step times for averaging
-                        let step_times: Vec<f64> = trace.steps.iter().map(|s| s.step_time_ms).collect();
-                        let avg_step_ms = if !step_times.is_empty() {
-                            step_times.iter().sum::<f64>() / step_times.len() as f64
-                        } else {
-                            0.0
-                        };
+                        // FIX: Do NOT check max_terms here - let traces complete to NF
+                        // Checking mid-reduction causes traces to abort before reaching normal form
+                        // Model MUST see complete reduction sequences to learn NF prediction
 
-                        // Check if trace is pathological (skip entire trace if so)
-                        let initial_size = trace.steps[0].term.size();
-                        let final_size = trace.steps.last().map(|s| s.term.size()).unwrap_or(initial_size);
-                        let size_growth_rate = if initial_size > 0 {
-                            final_size as f64 / initial_size as f64
-                        } else {
-                            1.0
-                        };
-                        let time_consumed_ratio = trace.total_time_ms / config.reduction_config.wall_clock_limit_ms;
+                        step_count = step_k;
 
-                        let is_trace_pathological = ExampleMetadata::detect_pathological(
-                            time_consumed_ratio,
-                            avg_step_ms,
-                            size_growth_rate,
-                            final_size,
-                        );
-
-                        // VALIDATION: Skip pathological traces (extreme growth, very slow, etc.)
-                        if is_trace_pathological {
-                            // This trace exhibits pathological behavior
-                            // Skip to maintain clean training data
-                            continue;
+                        // Track sizes for pathological detection
+                        let current_size = current_term.size();
+                        if step_k == 0 {
+                            initial_size = current_size;
                         }
+                        final_size = current_size;
 
-                        // VALIDATION: Skip trivial traces (already in NF or too short)
-                        let steps_total = trace.steps.len().saturating_sub(1);
-                        if steps_total == 0 {
-                            // Already in normal form - no reduction steps
-                            // Skip to ensure meaningful reduction examples
-                            continue;
-                        }
+                        // Render term immediately (no need to store Term object)
+                        let render_result = render_debruijn(current_term);
 
-                        if steps_total < 2 {
-                            // Only 1 reduction step - too trivial
-                            // Skip to ensure diverse, interesting patterns
-                            continue;
-                        }
-
-                        // Generate training examples from trace
-                        let trace_id = format!("{:016x}-{:016x}", worker_seed, draw_index);
-
-                        // Generate example for EACH step in trace
-                        for (step_k, step) in trace.steps.iter().enumerate() {
-                            let render_result = render_debruijn(&step.term);
-
-                            // Compute hash using DefaultHasher
-                            let mut hasher = DefaultHasher::new();
-                            render_result.string.hash(&mut hasher);
-                            let term_hash = format!("{:x}", hasher.finish());
+                        // Compute hash
+                        let mut hasher = DefaultHasher::new();
+                        render_result.string.hash(&mut hasher);
+                        let term_hash = format!("{:x}", hasher.finish());
 
                         // Get redex span
                         let target_span = get_redex_span(
-                            &step.term,
-                            step.redex_path.as_deref(),
+                            current_term,
+                            redex_path,
                             &render_result,
                         );
 
-                            // VALIDATION: Skip invalid examples with premature NF markers
-                            // target_span=(0,0) means "normal form reached", only valid on final step
-                            let is_final_step = step_k >= steps_total;
-                            let is_nf_marker = target_span == (0, 0);
+                        // Store rendered example (not the Term object!)
+                        buffered_examples.push((step_k, render_result.string, term_hash, target_span, current_size, current_term.depth()));
 
-                            if is_nf_marker && !is_final_step {
-                                // This is INVALID: NF marker on non-final step
-                                // This indicates a bug in find_redex or malformed term
-                                // Skip this example to maintain data quality
-                                continue;
-                            }
+                        // Continue processing
+                        true
+                    });
 
-                            // Compute runtime metrics
-                            let elapsed_time_ms: f64 = step_times[..=step_k].iter().sum();
-                            let time_remaining_ms =
-                                (config.reduction_config.wall_clock_limit_ms - elapsed_time_ms)
-                                    .max(0.0);
-                            let time_consumed_ratio = elapsed_time_ms
-                                / config.reduction_config.wall_clock_limit_ms;
+                    // Check if we should include diverged terms
+                    if !converged && !config.generator_config.allow_divergent {
+                        // Drop buffered examples and continue
+                        continue;
+                    }
 
-                            let current_size = step.term.size();
-                            let size_growth_rate = if initial_size > 0 {
-                                current_size as f64 / initial_size as f64
-                            } else {
-                                1.0
-                            };
+                    // Compute metrics for validation
+                    let avg_step_ms = if total_steps > 0 {
+                        total_time_ms / total_steps as f64
+                    } else {
+                        0.0
+                    };
 
-                            let is_pathological = ExampleMetadata::detect_pathological(
-                                time_consumed_ratio,
-                                avg_step_ms,
-                                size_growth_rate,
-                                current_size,
-                            );
+                    let size_growth_rate = if initial_size > 0 {
+                        final_size as f64 / initial_size as f64
+                    } else {
+                        1.0
+                    };
 
-                            // VALIDATION: Skip pathological examples (individual steps)
-                            // Even if the overall trace isn't pathological, individual steps can become
-                            // pathological as the term grows or slows down during reduction
-                            if is_pathological {
-                                continue;
-                            }
+                    let time_consumed_ratio = if total_time_ms > 1000.0 { 1.0 } else { total_time_ms / 1000.0 };
 
-                            // Create complete metadata
-                            // Note: is_pathological is always false here because we filter them out
-                            let meta = ExampleMetadata::new(
-                                current_size,
-                                step.term.depth(),
-                                worker_seed,
-                                chunk_id * chunk_size + draw_index,
-                                &trace_id,
-                                &term_hash,
-                                trace.thunk_evals,
-                                trace.thunk_hits,
-                                step.step_time_ms,
-                                avg_step_ms,
-                                trace.total_time_ms,
-                                config.reduction_config.wall_clock_limit_ms,
-                                time_remaining_ms,
-                                time_consumed_ratio,
-                                false, // Always false - pathological examples are filtered out
-                                size_growth_rate,
-                                initial_size,
-                            );
+                    // VALIDATION: Skip pathological traces
+                    let is_trace_pathological = ExampleMetadata::detect_pathological(
+                        time_consumed_ratio,
+                        avg_step_ms,
+                        size_growth_rate,
+                        final_size,
+                    );
 
-                            let example = TrainingExample {
-                                strategy: config.strategy.clone(),
-                                render: config.render.clone(),
-                                term: render_result.string,
-                                step_k,
-                                target_span,
-                                next_term: None, // Can be added if needed
-                                normal_form: None,
-                                steps_total,
-                                diverged: trace.diverged,
-                                trace_id: trace_id.clone(),
-                                meta,
-                            };
+                    if is_trace_pathological {
+                        // Drop buffered examples and continue
+                        continue;
+                    }
 
-                            // Send to consumer
-                            if tx.send(example).is_err() {
-                                should_stop.store(true, Ordering::Relaxed);
-                                break;
-                            }
+                    // VALIDATION: Skip trivial traces
+                    let steps_total = total_steps.saturating_sub(1);
+                    if steps_total == 0 || steps_total < 2 {
+                        // Drop buffered examples and continue
+                        continue;
+                    }
 
-                            examples_generated.fetch_add(1, Ordering::Relaxed);
+                    // Trace is valid! Emit buffered examples AS A COMPLETE UNIT
+                    // CRITICAL: Do NOT break mid-trace - model needs to see complete reduction to NF
+                    for (step_k, term_str, term_hash, target_span, current_size, current_depth) in buffered_examples {
+                        // FIX: Removed mid-trace termination checks
+                        // We must emit the ENTIRE trace atomically to ensure final NF steps are included
+                        // Breaking mid-trace means model never sees step_k==steps_total with target_span==(0,0)
+
+                        // VALIDATION: Skip invalid examples with premature NF markers
+                        let is_final_step = step_k >= steps_total;
+                        let is_nf_marker = target_span == (0, 0);
+
+                        if is_nf_marker && !is_final_step {
+                            continue;
+                        }
+
+                        // Compute runtime metrics
+                        let elapsed_time_ms = (step_k as f64 + 1.0) * avg_step_ms;
+                        let time_remaining_ms = 0.0;
+                        let time_consumed_ratio = elapsed_time_ms / total_time_ms;
+
+                        let size_growth_rate = if initial_size > 0 {
+                            current_size as f64 / initial_size as f64
+                        } else {
+                            1.0
+                        };
+
+                        // FIX: Do NOT filter individual examples within validated trace
+                        // Trace-level validation (lines 293-310) already ensures quality
+                        // Filtering per-example creates incomplete traces, breaking model training
+                        // Model MUST see EVERY step in trace to learn complete reduction sequence
+
+                        // Create metadata
+                        let meta = ExampleMetadata::new(
+                            current_size,
+                            current_depth,
+                            worker_seed,
+                            chunk_id * chunk_size + draw_index,
+                            &trace_id,
+                            &term_hash,
+                            0,
+                            0,
+                            avg_step_ms,
+                            avg_step_ms,
+                            total_time_ms,
+                            1000.0,
+                            time_remaining_ms,
+                            time_consumed_ratio,
+                            false,
+                            size_growth_rate,
+                            initial_size,
+                        );
+
+                        let example = TrainingExample {
+                            strategy: strategy_str.clone(),
+                            render: render_str.clone(),
+                            term: term_str,
+                            step_k,
+                            target_span,
+                            next_term: None,
+                            normal_form: None,
+                            steps_total,
+                            diverged: !converged,
+                            trace_id: trace_id.clone(),
+                            meta,
+                        };
+
+                        // Send to consumer
+                        if tx.send(example).is_err() {
+                            // Channel closed - stop all work immediately
+                            should_stop.store(true, Ordering::Relaxed);
+                            break;
+                        }
+
+                        examples_generated.fetch_add(1, Ordering::Relaxed);
+                    }
+
+                    // CRITICAL: Check max_terms AFTER emitting complete trace
+                    // This ensures traces are atomic - we never emit partial traces
+                    if let Some(max) = config.max_terms {
+                        let current_count = examples_generated.load(Ordering::Relaxed);
+                        if current_count >= max {
+                            should_stop.store(true, Ordering::Relaxed);
                         }
                     }
+
+                    // Check if we should stop after emitting examples
+                    if should_stop.load(Ordering::Relaxed) {
+                        break;  // Break from draw_index loop
+                    }
+                }  // End for draw_index
+
+                // Check if we should stop after chunk
+                if should_stop.load(Ordering::Relaxed) {
+                    break;  // Break from chunk_id loop
                 }
+            }  // End for chunk_id
             });
 
             handles.push(handle);
         }
 
-        // Drop main sender
+        // Drop main sender to signal no more data
         drop(tx);
 
-        // Wait for all workers
+        // Wait for all workers to finish
         for handle in handles {
             let _ = handle.join();
         }
 
-        // Wait for consumer
+        // Wait for consumer and return final count
         consumer.join().unwrap()
     }
 }

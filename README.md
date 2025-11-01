@@ -1,245 +1,236 @@
-# Lambda Calculus Neural Reduction
+# Lambda Calculus Neural Network Reduction
 
-A high-performance system for training neural networks to perform lambda calculus β-reduction. Achieves **99.95% normal form accuracy** and **98.5% exact match** on reduction prediction tasks.
+**Status:** Work in Progress - Experimental Research Project
 
 ## Overview
 
-This project trains transformer models to predict the next reduction step in lambda calculus terms. The system generates high-quality training data using graph-based reduction with Levy-style optimal evaluation, then trains encoder-only transformers to learn reduction strategies.
+This project explores the application of neural networks to lambda calculus β-reduction. The goal is to train transformer models to predict reduction steps in lambda terms, potentially learning reduction strategies through pattern recognition.
 
-**Key Results:**
-- 99.95% normal form detection accuracy
-- 98.5% exact match on redex prediction
-- Stable training with monotonic loss decrease
-- 95,000 tokens/second training throughput
+### What is Lambda Calculus?
 
-**Performance:**
-- **Data Generation**: 41,500+ examples/second (Rust, 8 workers)
-- **484x faster** than Python baseline
-- Zero external dependencies (std-only Rust)
+Lambda calculus is a formal system in mathematical logic for expressing computation based on function abstraction and application. β-reduction is the process of simplifying lambda terms by applying functions to their arguments.
 
-## Quick Start
+### Project Purpose
 
-### Prerequisites
+This repository contains:
+- **Training infrastructure** for teaching neural networks to predict lambda calculus reductions
+- **Data generation tools** that create training examples from lambda term reductions
+- **Inference systems** to compare learned strategies against classical reduction approaches
+- **Evaluation utilities** for measuring model behavior
 
-```bash
-# Python 3.7+ with PyTorch
-pip install torch numpy
+## Important Notes
 
-# Rust 1.70+ (for data generation)
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
+- **No performance claims**: This is experimental research code. Any metrics or results should be considered preliminary and subject to change.
+- **Work in progress**: The codebase is under active development and may contain incomplete features or experimental code.
+- **Research quality**: This is research-grade code, not production software.
 
-### Generate Training Data
-
-```bash
-cd lambda_gen_rs
-cargo build --release
-cargo run --release -- generate training_data.jsonl 100000 8 250
-```
-
-Generates 100k examples with 8 workers and 250ms wall clock limit per term.
-
-### Train Model
-
-```bash
-python lambda_train.py \
-    --train-data training_data.jsonl \
-    --output-dir runs/levy_700m \
-    --d-model 1024 \
-    --n-layers 12 \
-    --batch-tokens 16384 \
-    --steps 100000 \
-    --lr 3e-4
-```
-
-For 16GB GPUs, add `--gradient-checkpointing --use-8bit-adam` flags.
-
-### Run Inference
-
-```bash
-python lambda_infer.py \
-    --checkpoint runs/levy_700m/checkpoint_best.pt \
-    --num-terms 100
-```
-
-## Architecture
-
-**Data Generator (Rust):**
-- Random term generation with configurable complexity
-- Graph-based call-by-need reduction with thunk memoization
-- Wall-clock-limited execution with comprehensive metrics
-- Lock-free parallel pipeline for maximum throughput
-
-**Model (Transformer):**
-- Encoder-only architecture (75M-700M parameters)
-- Character-level tokenization of De Bruijn terms
-- RoPE positional encoding
-- Dual pointer heads for redex span prediction (start/end)
-- Trained with gradient checkpointing and 8-bit AdamW for memory efficiency
-
-**Training Data Schema:**
-- 19 metadata fields per example
-- Runtime metrics (wall clock, step times, budget consumption)
-- Pathological case detection (zero-filtered in final data)
-- Sharing metrics (thunk evaluations, cache hits)
-- Complete reduction traces to normal form
-
-## Training Data Quality
-
-The generator includes comprehensive filtering to ensure clean training data:
-
-- **Zero pathological cases** (filtered at trace and example level)
-- **Zero divergent terms** (non-normalizing terms excluded)
-- **Zero premature normal form markers** (validation filtering)
-- **Zero single-step trivial examples** (minimum 2 steps required)
-- **Diverse parameter variation** (5 complexity levels for coverage)
-- **Time-based RNG seeding** (maximizes uniqueness across runs)
-
-Detection criteria for pathological cases:
-- Time consumed ratio >50% of budget
-- Average step time >3ms
-- Term size growth rate >2.5x
-- Current term size >150 nodes
-
-## Project Structure
+## Repository Structure
 
 ```
 LM/
-├── lambda_gen_rs/          # High-performance Rust generator
-│   ├── src/
-│   │   ├── generator.rs    # Term generation
-│   │   ├── reduction.rs    # Graph reduction engine
-│   │   ├── parallel.rs     # Multi-threaded pipeline
-│   │   └── schema.rs       # Training data schema
-│   └── VALIDATION.md       # Implementation validation
+├── lambda_train.py              # Neural network training script
+├── lambda_infer.py              # Inference and comparison engine
+├── lambda_gen.py                # Python data generator (reference implementation)
+├── parallel_gen.py              # Parallel data generation utilities
+├── performance_metrics.py       # Metrics collection and analysis
+├── export_onnx.py               # Model export utilities
+├── diagnose_early_stopping.py   # Training diagnostics
 │
-├── lambda_train.py         # Model training script
-├── lambda_infer.py         # Inference and evaluation
-├── lambda_gen.py           # Python generator (reference)
+├── lambda_gen_rs/               # High-performance Rust data generator
+│   ├── src/                     # Rust source code
+│   ├── BUILD.md                 # Build instructions
+│   ├── VALIDATION.md            # Validation documentation
+│   └── INFERENCE.md             # Inference notes
 │
-├── tests/                  # Diagnostic and verification tools
+├── tests/                       # Test and diagnostic scripts
 │   ├── diagnose_training_data.py
 │   ├── check_diversity.py
-│   └── verify_zero_pathological.sh
+│   └── ... (various test utilities)
 │
-└── docs/                   # Technical documentation
-    ├── IMPLEMENTATION_NOTES.md
-    ├── NF_REDUCTION_ANALYSIS.md
-    ├── RUNTIME_AWARE_SUMMARY.md
-    └── issues/             # Issue resolution history
+└── docs/                        # Documentation
+    ├── reference/               # Technical reference docs
+    ├── issues/                  # Issue resolution history
+    └── ... (various technical docs)
 ```
 
-## Rust Generator CLI
+## Core Components
 
+### 1. Data Generation
+
+The system generates training data by:
+- Creating random lambda terms with controlled complexity
+- Reducing them using classical reduction strategies (normal-order, call-by-need)
+- Recording the reduction sequence and redex positions
+- Outputting structured training examples in JSONL format
+
+Two implementations are available:
+- **Python** (`lambda_gen.py`): Reference implementation, easier to modify
+- **Rust** (`lambda_gen_rs/`): High-performance implementation for large-scale generation
+
+### 2. Model Training
+
+The training system (`lambda_train.py`) implements:
+- Encoder-only transformer architecture
+- Character-level tokenization of lambda terms
+- Span prediction heads for identifying reduction positions
+- Normal form detection
+- Various optimization strategies (gradient checkpointing, mixed precision, etc.)
+
+### 3. Inference and Evaluation
+
+The inference engine (`lambda_infer.py`) can:
+- Load trained models
+- Run inference on lambda terms
+- Compare neural predictions against classical reduction
+- Generate evaluation metrics
+
+## Getting Started
+
+### Prerequisites
+
+**For Python components:**
 ```bash
-# Basic usage
-cargo run --release -- generate <output.jsonl> <num_examples> <workers> <wall_clock_ms>
-
-# Example: 1M examples, 16 workers, 250ms limit
-cargo run --release -- generate data.jsonl 1000000 16 250
-
-# Custom seed for reproducibility
-cargo run --release -- generate data.jsonl 100000 8 250 <seed>
+pip install torch numpy
 ```
 
-## Model Configuration
-
-| Size | d_model | n_layers | Parameters | VRAM (8-bit Adam) |
-|------|---------|----------|------------|-------------------|
-| Small | 512 | 6 | 38M | 2 GB |
-| Medium | 768 | 8 | 75M | 4 GB |
-| Large | 1024 | 12 | 150M | 8 GB |
-| XL | 1536 | 18 | 700M | 32 GB |
-
-## Key Features
-
-**Wall Clock Limiting:**
-- Real-time budgets instead of abstract "fuel" counts
-- Models learn actual computational costs
-- Per-step timing tracked in metadata
-
-**Complete Normal Form Reduction:**
-- All traces reduce to normal form (no early stopping)
-- Model learns to predict `(0,0)` span when NF reached
-- Final step always includes NF marker
-
-**Runtime-Aware Training:**
-- 19 metadata fields per example
-- Pathological case detection and filtering
-- Time budget consumption tracking
-- Size growth rate monitoring
-
-**Production-Grade Engineering:**
-- Zero-dependency Rust implementation
-- Custom RNG for reproducibility
-- Lock-free parallel architecture
-- Manual JSON serialization for portability
-
-## Validation
-
-Verify data quality after generation:
-
+**For Rust data generator (optional):**
 ```bash
-# Automated verification (generates 5k test examples)
-./tests/verify_zero_pathological.sh
+# Install Rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# Manual diagnostic
-python tests/diagnose_training_data.py training_data.jsonl 10000
-
-# Diversity analysis
-python tests/check_diversity.py training_data.jsonl
+# Build the generator
+cd lambda_gen_rs
+cargo build --release
 ```
 
-Expected metrics:
-- ✅ Pathological: 0.0%
-- ✅ Diverged: 0.0%
-- ✅ Premature NF: 0.0%
-- ✅ Zero-step: 0.0%
-- ✅ Term uniqueness: >90%
+### Basic Usage
+
+**Generate training data:**
+```bash
+# Using Python generator
+python lambda_gen.py live --strategy normal --out train.jsonl --max-terms 10000
+
+# Using Rust generator (faster)
+cd lambda_gen_rs
+cargo run --release -- generate train.jsonl 10000 8 250
+```
+
+**Train a model:**
+```bash
+python lambda_train.py \
+    --train train.jsonl \
+    --out runs/experiment_001 \
+    --d-model 384 \
+    --n-layers 4 \
+    --batch-tokens 16384 \
+    --epochs 10
+```
+
+**Run inference:**
+```bash
+python lambda_infer.py \
+    --checkpoint runs/experiment_001/checkpoint_best.pt \
+    --num-terms 100
+```
+
+## Architecture Details
+
+### Lambda Term Representation
+
+Terms are represented using de Bruijn indices:
+- `\.body` - Lambda abstraction
+- `f x` - Function application (left-associative)
+- `0, 1, 2, ...` - Variable references (de Bruijn indices)
+
+Example: The term `λx. λy. x y` becomes `\.\.1 0`
+
+### Model Architecture
+
+- **Type**: Encoder-only transformer
+- **Tokenization**: Character-level on lambda term strings
+- **Position encoding**: RoPE (Rotary Position Embeddings)
+- **Prediction heads**:
+  - Start/end span pointers for redex location
+  - Normal form classifier
+- **Training objective**: Cross-entropy + soft IoU loss for span prediction
+
+### Reduction Strategies
+
+The data generator supports multiple reduction strategies:
+- **Normal order**: Leftmost-outermost reduction (tree-based)
+- **Call-by-need**: Graph reduction with sharing and memoization
+
+## Development and Testing
+
+**Run validation suite:**
+```bash
+python lambda_gen.py validate --n 2000
+```
+
+**Check data diversity:**
+```bash
+python tests/check_diversity.py train.jsonl
+```
+
+**Diagnose training data:**
+```bash
+python tests/diagnose_training_data.py train.jsonl 10000
+```
 
 ## Documentation
 
-Comprehensive technical documentation available in `docs/`:
+Additional documentation can be found in:
+- `docs/` - Technical documentation and design notes
+- `docs/issues/` - Resolved issues and their solutions
+- `docs/reference/` - Reference material on specific topics
+- `lambda_gen_rs/BUILD.md` - Rust build instructions
+- `lambda_gen_rs/VALIDATION.md` - Data generator validation
 
-- **[IMPLEMENTATION_NOTES.md](docs/IMPLEMENTATION_NOTES.md)** - Implementation details
-- **[NF_REDUCTION_ANALYSIS.md](docs/NF_REDUCTION_ANALYSIS.md)** - Normal form verification
-- **[RUNTIME_AWARE_SUMMARY.md](docs/RUNTIME_AWARE_SUMMARY.md)** - Runtime awareness design
-- **[FUEL_BUDGET_INVESTIGATION.md](docs/FUEL_BUDGET_INVESTIGATION.md)** - Wall clock design rationale
-- **[lambda_gen_rs/VALIDATION.md](lambda_gen_rs/VALIDATION.md)** - Rust validation report
-- **[docs/issues/](docs/issues/)** - Issue resolution history
+## Research Context
 
-## Windows Setup
+This project explores several interesting questions:
+- Can neural networks learn efficient reduction strategies?
+- What patterns do models discover in lambda term structure?
+- How do learned strategies compare to classical reduction orders?
+- Can models generalize to terms larger than those seen during training?
 
-Rust requires a linker on Windows. Choose one:
+## Limitations and Future Work
 
-**Option 1 - Visual Studio Build Tools (Recommended):**
-```powershell
-# Download from: https://visualstudio.microsoft.com/downloads/
-# Install "Desktop development with C++"
-# Then: cargo build --release
-```
+**Current limitations:**
+- Model size and training time constrained by available compute
+- Limited to de Bruijn representation (no named variables in training)
+- Evaluation primarily on synthetic randomly-generated terms
+- No theoretical guarantees on correctness or termination
 
-**Option 2 - GNU Toolchain:**
-```powershell
-rustup target add x86_64-pc-windows-gnu
-winget install -e --id msys2.msys2
-cargo build --release --target x86_64-pc-windows-gnu
-```
+**Potential future directions:**
+- Explore different model architectures (decoder-only, encoder-decoder)
+- Train on larger and more diverse term distributions
+- Investigate learned strategies through model analysis
+- Explore applications to program optimization or proof search
+
+## Contributing
+
+This is a research project and contributions are welcome, though the codebase is rapidly evolving. Please:
+- Document any experimental features clearly
+- Include tests for new functionality
+- Update relevant documentation
 
 ## License
 
-MIT License
+MIT License (or specify your license)
 
 ## Citation
 
+If you use this code in your research, please cite this repository:
+
 ```bibtex
 @software{lambda_neural_reduction_2024,
-  title = {Lambda Calculus Neural Reduction},
+  title = {Lambda Calculus Neural Network Reduction},
   year = {2024},
-  note = {99.95\% normal form accuracy, 98.5\% exact match}
+  note = {Experimental research project}
 }
 ```
 
 ---
 
-**Status:** Production-ready. Achieves state-of-the-art accuracy on lambda calculus reduction prediction.
+**Disclaimer**: This is experimental research software under active development. Results, APIs, and implementations may change significantly.

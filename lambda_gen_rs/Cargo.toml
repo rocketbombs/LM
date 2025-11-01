@@ -8,9 +8,10 @@ authors = ["Lambda Calculus Generator"]
 name = "lambda-gen"
 path = "src/main.rs"
 
-[[bin]]
-name = "lambda-infer"
-path = "src/bin/infer.rs"
+# Disabled: requires external dependencies (rayon, tract_onnx, etc.)
+# [[bin]]
+# name = "lambda-infer"
+# path = "src/bin/infer.rs"
 
 [dependencies]
 # NOTE: External dependencies commented out due to network restrictions

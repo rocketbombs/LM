@@ -23,13 +23,21 @@ pub mod render;
 pub mod schema;
 pub mod classical;
 pub mod tokenizer;
-pub mod neural;
+
+// Neural module disabled - requires external dependencies (tract_onnx, ndarray)
+// Uncomment when dependencies are available
+// pub mod neural;
 
 pub use term::{Term, TermType, TermArena};
-pub use reduction::{GraphReducer, ReductionConfig, ReductionTrace};
 pub use generator::{TermGenerator, GeneratorConfig};
 pub use parallel::{ParallelPipeline, PipelineConfig};
 pub use schema::TrainingExample;
-pub use classical::ClassicalReducer;
+pub use classical::{ClassicalReducer, ClassicalReduction, ClassicalTrace, ReductionStep};
 pub use tokenizer::LambdaTokenizer;
-pub use neural::NeuralReducer;
+
+// NeuralReducer disabled - requires external dependencies
+// pub use neural::NeuralReducer;
+
+// Keep reduction module for backward compatibility if needed, but mark as deprecated
+#[allow(deprecated)]
+pub use reduction::{GraphReducer, ReductionConfig};

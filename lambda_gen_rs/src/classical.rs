@@ -6,6 +6,13 @@
 use crate::term::Term;
 use std::time::Instant;
 
+/// Single step in a reduction trace
+#[derive(Debug, Clone)]
+pub struct ReductionStep {
+    pub term: Term,
+    pub redex_path: Option<Vec<usize>>,
+}
+
 /// Reduction result with metrics
 #[derive(Debug, Clone)]
 pub struct ClassicalReduction {
@@ -13,6 +20,14 @@ pub struct ClassicalReduction {
     pub steps: usize,
     pub total_time_ms: f64,
     pub converged: bool,
+}
+
+/// Reduction trace with all intermediate steps
+#[derive(Debug, Clone)]
+pub struct ClassicalTrace {
+    pub steps: Vec<ReductionStep>,
+    pub converged: bool,
+    pub total_time_ms: f64,
 }
 
 /// Classical normal-order reducer
@@ -54,6 +69,136 @@ impl ClassicalReducer {
             steps,
             total_time_ms: start.elapsed().as_secs_f64() * 1000.0,
             converged: false,
+        }
+    }
+
+    /// Reduce term with streaming callback for training data generation
+    ///
+    /// MEMORY EFFICIENT: Processes each step via callback without accumulating trace.
+    /// Callback is invoked for each step with: (step_index, term, redex_path, is_final)
+    /// Returns (converged, total_steps, total_time_ms)
+    pub fn reduce_with_streaming<F>(&self, term: &Term, mut callback: F) -> (bool, usize, f64)
+    where
+        F: FnMut(usize, &Term, Option<&[usize]>, bool) -> bool, // Returns false to abort
+    {
+        let start = Instant::now();
+        let mut current = term.clone();
+        let mut step_count = 0;
+
+        // Process initial state
+        let initial_redex = Self::find_redex(&current);
+        let is_nf = initial_redex.is_none();
+
+        // Invoke callback for initial step
+        if !callback(0, &current, initial_redex.as_deref(), is_nf) {
+            // Callback requested abort
+            let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+            return (false, 1, elapsed);
+        }
+
+        // If already in normal form, return immediately
+        if is_nf {
+            let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+            return (true, 1, elapsed);
+        }
+
+        // Reduce step by step
+        for step in 0..self.max_steps {
+            if let Some(path) = Self::find_redex(&current) {
+                // Apply β-reduction at path
+                current = Self::reduce_at_path(current, &path);
+                step_count = step + 1;
+
+                // Find next redex
+                let next_redex = Self::find_redex(&current);
+                let is_final = next_redex.is_none();
+
+                // Invoke callback with reduced term
+                if !callback(step_count, &current, next_redex.as_deref(), is_final) {
+                    // Callback requested abort
+                    let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+                    return (false, step_count + 1, elapsed);
+                }
+
+                // Check if we reached normal form
+                if is_final {
+                    let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+                    return (true, step_count + 1, elapsed);
+                }
+            } else {
+                // Normal form reached
+                let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+                return (true, step_count + 1, elapsed);
+            }
+        }
+
+        // Hit max steps without converging
+        let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+        (false, step_count + 1, elapsed)
+    }
+
+    /// Reduce term with full trace for training data generation
+    ///
+    /// DEPRECATED: Use reduce_with_streaming for memory efficiency.
+    /// This method accumulates entire trace in memory.
+    #[deprecated(note = "Use reduce_with_streaming to avoid memory leaks")]
+    pub fn reduce_with_trace(&self, term: &Term) -> ClassicalTrace {
+        let start = Instant::now();
+        let mut current = term.clone();
+        let mut trace = Vec::with_capacity(64);
+
+        // Add initial state
+        let initial_redex = Self::find_redex(&current);
+        trace.push(ReductionStep {
+            term: current.clone(),
+            redex_path: initial_redex.clone(),
+        });
+
+        // If already in normal form, return immediately
+        if initial_redex.is_none() {
+            return ClassicalTrace {
+                steps: trace,
+                converged: true,
+                total_time_ms: start.elapsed().as_secs_f64() * 1000.0,
+            };
+        }
+
+        // Reduce step by step
+        for _ in 0..self.max_steps {
+            if let Some(path) = Self::find_redex(&current) {
+                // Apply β-reduction at path
+                current = Self::reduce_at_path(current, &path);
+
+                // Find next redex
+                let next_redex = Self::find_redex(&current);
+                trace.push(ReductionStep {
+                    term: current.clone(),
+                    redex_path: next_redex.clone(),
+                });
+
+                // Check if we reached normal form
+                if next_redex.is_none() {
+                    return ClassicalTrace {
+                        steps: trace,
+                        converged: true,
+                        total_time_ms: start.elapsed().as_secs_f64() * 1000.0,
+                    };
+                }
+            } else {
+                // Normal form reached
+                return ClassicalTrace {
+                    steps: trace,
+                    converged: true,
+                    total_time_ms: start.elapsed().as_secs_f64() * 1000.0,
+                };
+            }
+        }
+
+        // Hit max steps without converging
+        ClassicalTrace {
+            steps: trace,
+            converged: false,
+            total_time_ms: start.elapsed().as_secs_f64() * 1000.0,
         }
     }
 

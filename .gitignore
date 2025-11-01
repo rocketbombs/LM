@@ -34,12 +34,20 @@ checkpoints/
 *.jsonl
 *.log
 
+# Data files
+data/
+*.data
+
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+
+# Rust build artifacts
+target/
+Cargo.lock
 
 # OS
 .DS_Store

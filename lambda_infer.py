@@ -20,6 +20,7 @@
 
 import argparse
 import json
+import math
 import random
 import sys
 from pathlib import Path
@@ -50,6 +51,7 @@ class InferenceConfig:
     seed: int = 42
     verbose: bool = False
     output_dir: Optional[str] = None
+    nf_confidence_threshold: float = 0.999
 
 
 @dataclass
@@ -98,6 +100,12 @@ class InferenceEngine:
     def __init__(self, config: InferenceConfig):
         self.config = config
         torch.manual_seed(config.seed)
+
+        if not (0.5 < config.nf_confidence_threshold < 1.0):
+            raise ValueError("nf_confidence_threshold must be between 0.5 and 1.0 (exclusive).")
+        self._nf_logit_threshold = math.log(
+            config.nf_confidence_threshold / (1.0 - config.nf_confidence_threshold)
+        )
 
         # Setup device
         self.device = torch.device(config.device)
@@ -218,15 +226,26 @@ class InferenceEngine:
         start_logits = outputs['start_logits'][0]  # (L,)
         end_logits = outputs['end_logits'][0]  # (L,)
         nf_logit = outputs['nf_logits'][0].item()
+        if nf_logit >= 0:
+            exp_term = math.exp(-nf_logit)
+            nf_prob = 1.0 / (1.0 + exp_term)
+        else:
+            exp_term = math.exp(nf_logit)
+            nf_prob = exp_term / (1.0 + exp_term)
 
-        # Check if model predicts normal form
-        nf_prob = torch.sigmoid(torch.tensor(nf_logit)).item()
+        has_redex = self._has_redex(term)
+        is_confident_nf = nf_logit >= self._nf_logit_threshold
 
         if self.config.verbose:
-            has_redex = self._has_redex(term)
-            print(f"    Model NF prediction: {nf_prob:.4f} | Actual has redex: {has_redex}")
+            print(
+                f"    Model NF prediction: {nf_prob:.6f} "
+                f"(threshold {self.config.nf_confidence_threshold:.6f}) | "
+                f"Actual has redex: {has_redex}"
+            )
+            if is_confident_nf and has_redex:
+                print("    Warning: NF head is overconfident; falling back to reduction.")
 
-        if nf_prob > 0.5:
+        if not has_redex:
             return None, True, render_result
 
         # Get start and end positions
@@ -260,12 +279,9 @@ class InferenceEngine:
 
         current_term = term
         total_tokens = 0
-        initial_term_str = None
 
         for step_num in range(self.config.max_steps):
             term_str = Renderer.to_debruijn_with_spans(current_term).string
-            if step_num == 0:
-                initial_term_str = term_str
             term_tokens = len(term_str)
             total_tokens += term_tokens
 
@@ -273,9 +289,8 @@ class InferenceEngine:
             redex_path, is_nf, render_result = self.predict_redex(current_term)
 
             # Accept neural model's NF prediction as-is
-            if is_nf or redex_path is None:
-                # Neural model predicts normal form - trust it
-                final_nf_str = Renderer.to_debruijn_with_spans(current_term).string
+            if is_nf:
+                final_nf_str = render_result.string
                 return ReductionTrace(
                     strategy='neural',
                     converged=True,
@@ -285,14 +300,25 @@ class InferenceEngine:
                     final_term=current_term
                 )
 
-            # Verify the path points to a valid redex
-            if not self._is_valid_redex_path(current_term, redex_path):
-                # Invalid prediction - check if term actually has redexes
+            chosen_path = redex_path
+            fallback_reason = None
+
+            if chosen_path is None:
+                fallback_reason = "no_span"
+            elif not self._is_valid_redex_path(current_term, chosen_path):
+                fallback_reason = "invalid_span"
+
+            if fallback_reason is not None:
+                chosen_path = self.neural_reducer._find_leftmost_outermost(current_term)
+                if self.config.verbose:
+                    print(f"    Falling back to classical span ({fallback_reason}).")
+
+            if chosen_path is None:
                 has_redexes = self._has_redex(current_term)
-                final_nf_str = Renderer.to_debruijn_with_spans(current_term).string
+                final_nf_str = render_result.string
                 return ReductionTrace(
                     strategy='neural',
-                    converged=not has_redexes,  # Only converged if truly in NF
+                    converged=not has_redexes,
                     total_steps=step_num + 1,
                     total_tokens=total_tokens,
                     final_nf_str=final_nf_str,
@@ -301,7 +327,7 @@ class InferenceEngine:
 
             # Reduce at predicted path
             try:
-                current_term = self.neural_reducer._apply_reduction(current_term, redex_path)
+                current_term = self.neural_reducer._apply_reduction(current_term, chosen_path)
             except Exception as e:
                 if self.config.verbose:
                     print(f"Reduction failed at step {step_num}: {e}")
@@ -314,6 +340,9 @@ class InferenceEngine:
                     final_nf_str=final_nf_str,
                     final_term=current_term
                 )
+            finally:
+                # Drop reference eagerly to let GC reclaim span maps
+                render_result = None
 
         # Exceeded max steps
         final_nf_str = Renderer.to_debruijn_with_spans(current_term).string
@@ -410,6 +439,8 @@ class InferenceEngine:
 
     def _has_redex(self, term: Term) -> bool:
         # Check if term contains any redex (is not in normal form)
+        if not isinstance(term, Term):
+            raise TypeError(f"_has_redex expected Term, got {type(term).__name__}")
         if term.type == TermType.APP and term.left and term.left.type == TermType.ABS:
             return True
 
@@ -538,36 +569,44 @@ class InferenceEngine:
         print(f"Max size: {self.config.max_size}")
         print(f"Max steps: {self.config.max_steps}\n")
 
-        # Generate terms
-        terms = []
-        attempts = 0
         max_attempts = self.config.num_terms * 10
-
-        while len(terms) < self.config.num_terms and attempts < max_attempts:
-            term = self.term_gen.generate()
-            if term:
-                terms.append(term)
-                if (len(terms)) % 20 == 0:
-                    print(f"  Generated {len(terms)}/{self.config.num_terms} terms...")
-            attempts += 1
-
-        if len(terms) < self.config.num_terms:
-            print(f"Warning: Only generated {len(terms)} terms after {attempts} attempts")
+        attempts = 0
+        generated = 0
+        processed = 0
 
         print(f"\nRunning dual reduction (neural vs classical)...\n")
 
-        # Run comparisons
-        for i, term in enumerate(terms):
-            if not self.config.verbose and (i + 1) % 10 == 0:
-                print(f"  Processed {i + 1}/{len(terms)} terms...")
+        while processed < self.config.num_terms and attempts < max_attempts:
+            term = self.term_gen.generate()
+            attempts += 1
+
+            if term is None:
+                continue
+
+            generated += 1
+            if generated % 20 == 0:
+                print(f"  Generated {generated}/{self.config.num_terms} candidate terms...")
 
             try:
                 metrics = self.compare_strategies(term)
-                self.comparisons.append(metrics)
             except Exception as e:
                 if self.config.verbose:
-                    print(f"Error processing term {i}: {e}")
-                continue
+                    print(f"Error processing generated term {generated}: {e}")
+            else:
+                self.comparisons.append(metrics)
+                processed += 1
+
+                if not self.config.verbose and processed % 10 == 0:
+                    print(f"  Processed {processed}/{self.config.num_terms} terms...")
+            finally:
+                # Explicitly drop reference to the last term to help GC in long runs
+                del term
+
+        if processed < self.config.num_terms:
+            print(
+                f"Warning: Completed {processed}/{self.config.num_terms} terms "
+                f"after {attempts} attempts"
+            )
 
         # Print summary
         self.print_summary()
@@ -768,6 +807,8 @@ def main():
                        help='Print detailed output')
     parser.add_argument('--output-dir', type=str,
                        help='Output directory for results')
+    parser.add_argument('--nf-confidence-threshold', type=float, default=0.999,
+                        help='Minimum probability required to declare normal form')
 
     args = parser.parse_args()
     config = InferenceConfig(**vars(args))

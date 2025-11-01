@@ -1,6 +1,6 @@
 //! Lambda Calculus generator CLI
 
-use lambda_gen_rs::{GeneratorConfig, ParallelPipeline, PipelineConfig, ReductionConfig};
+use lambda_gen_rs::{GeneratorConfig, ParallelPipeline, PipelineConfig};
 use std::env;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -33,11 +33,11 @@ fn main() {
             } else {
                 8
             };
-            let wall_clock_ms = if args.len() > 5 {
+            let _wall_clock_ms = if args.len() > 5 {
                 args[5].parse().expect("Invalid wall_clock_ms")
             } else {
                 250.0
-            };
+            };  // Kept for backward compatibility in CLI args, but not used in classical reduction
 
             // Use entropy-rich seed for maximum diversity (or user-provided)
             let seed = if args.len() > 6 {
@@ -99,7 +99,7 @@ fn main() {
             };
 
             println!("Generating {} examples with {} workers...", num_terms, num_workers);
-            println!("Wall clock limit: {}ms per term", wall_clock_ms);
+            println!("Max reduction steps: 1000 per term");
             println!("RNG seed: {} (multi-source entropy for TRUE diversity)", seed);
 
             let config = PipelineConfig {
@@ -110,11 +110,8 @@ fn main() {
                     max_size: 250,        // INCREASED: Much larger to get 160-200 range
                     allow_divergent: false,  // CRITICAL: Filter out non-normalizing terms
                 },
-                reduction_config: ReductionConfig {
-                    wall_clock_limit_ms: wall_clock_ms,
-                    max_steps: 1000,     // INCREASED: Larger terms need more steps
-                },
-                strategy: "levy_like".to_string(),
+                max_steps: 1000,         // INCREASED: Larger terms need more steps
+                strategy: "normal".to_string(),  // Normal-order reduction (leftmost-outermost)
                 render: "debruijn".to_string(),
                 seed,  // FIX: Use computed seed instead of hardcoded 42
                 max_terms: Some(num_terms),
@@ -131,6 +128,7 @@ fn main() {
             let writer_clone = writer.clone();
             let count_clone = count.clone();
 
+            let progress_start = Instant::now();
             pipeline.generate(move |example| {
                 let json = example.to_json();
                 {
@@ -139,10 +137,18 @@ fn main() {
                 }
                 let c = count_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 if c % 100 == 0 {
-                    print!("\rGenerated {} examples...", c);
+                    let elapsed = progress_start.elapsed().as_secs_f64();
+                    let throughput = c as f64 / elapsed;
+                    print!("\rGenerated {} examples ({:.0} ex/s)...", c, throughput);
                     std::io::stdout().flush().unwrap();
                 }
             });
+
+            // Explicitly flush writer before dropping
+            {
+                let mut w = writer.lock().unwrap();
+                w.flush().expect("Failed to flush writer");
+            }
 
             let final_count = count.load(std::sync::atomic::Ordering::Relaxed);
             let elapsed = start.elapsed();
@@ -168,8 +174,8 @@ fn main() {
             let config = PipelineConfig {
                 num_workers,
                 generator_config: GeneratorConfig::default(),
-                reduction_config: ReductionConfig::default(),
-                strategy: "levy_like".to_string(),
+                max_steps: 1000,
+                strategy: "normal".to_string(),
                 render: "debruijn".to_string(),
                 seed: 42,
                 max_terms: Some(num_terms),
