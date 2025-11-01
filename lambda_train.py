@@ -119,7 +119,7 @@ class TrainingConfig:
     dry_run: bool = False
     
     # Streaming
-    stream_buffer: int = 10000
+    stream_buffer: Optional[int] = None  # None = load all examples (for full 100M dataset)
     val_samples: int = 1000
 
 
@@ -343,8 +343,8 @@ class LambdaDataset(Dataset):
     #and yields batches that fit within token budget.
     #
     
-    def __init__(self, jsonl_path: str, tokenizer: LambdaTokenizer, 
-                 max_len: int, buffer_size: int = 10000, truncate: str = 'tail'):
+    def __init__(self, jsonl_path: str, tokenizer: LambdaTokenizer,
+                 max_len: int, buffer_size: Optional[int] = None, truncate: str = 'tail'):
         self.tokenizer = tokenizer
         self.max_len = max_len
         self.truncate = truncate
@@ -353,29 +353,34 @@ class LambdaDataset(Dataset):
         self.examples: List[Dict[str, Any]] = []
         self._load_from_jsonl(jsonl_path, buffer_size)
     
-    def _load_from_jsonl(self, path: str, max_examples: int):
-        #Load examples from JSONL with optional reservoir sampling.#
+    def _load_from_jsonl(self, path: str, max_examples: Optional[int]):
+        #Load examples from JSONL. If max_examples is None, loads ALL examples (for full 100M dataset).#
         if path == '-':
             stream = sys.stdin
         else:
             stream = open(path, 'r')
-        
+
         try:
             for i, line in enumerate(stream):
-                if i >= max_examples:
+                # Only check limit if max_examples is specified
+                if max_examples is not None and i >= max_examples:
                     break
-                
+
                 try:
                     example = json.loads(line.strip())
                     self.examples.append(example)
                 except json.JSONDecodeError:
                     continue
+
+                # Print progress every 1M examples for large datasets
+                if (i + 1) % 1_000_000 == 0:
+                    print(f"  Loaded {(i + 1) // 1_000_000}M examples...")
         finally:
             if path != '-':
                 stream.close()
-        
-        print(f"Loaded {len(self.examples)} examples from {path}")
-        
+
+        print(f"Loaded {len(self.examples):,} examples from {path}")
+
         # Sort by term length for efficient batching
         print("Sorting examples by length for efficient batch packing...")
         self.examples.sort(key=lambda ex: len(ex['term']))
